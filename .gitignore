@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.so
+
+# Virtual Environments
+.venv/
+.venv-1/
+venv/
+env/
+ENV/
+
+# Environment Variables (NEVER commit secrets!)
+.env
+.env.local
+.env.*.local
+
+# Streamlit
+.streamlit/
+
+# Uploads / Generated Files
+uploads/
+generated_reports/
+local_wheelhouse/
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
+*.tmp
