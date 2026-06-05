@@ -1,6 +1,7 @@
 from langgraph.graph import StateGraph, START, END
 from backend.schemas.state_schema import AgentState
 from backend.agents.task_agent import run_task_agent
+from backend.agents.planning_agent import run_planning_agent
  
  
 # -----------------------------------------------------------------
@@ -31,12 +32,15 @@ def hitl_1_node(state: AgentState) -> AgentState:
  
 def planning_agent_node(state: AgentState) -> AgentState:
     """
-    Planning Agent node — stub until planning_agent.py is implemented.
+    Planning Agent node.
     Reads approved_requirements, writes plan.
     """
     approved_requirements = state.get("approved_requirements", {})
-    # TODO: replace with real planning agent call once implemented
-    return {"plan": {"_stub": True, "based_on": approved_requirements}}
+    if not approved_requirements:
+        raise ValueError("approved_requirements is required for the Planning Agent")
+        
+    output = run_planning_agent(approved_requirements)
+    return {"plan": output.model_dump()}
  
  
 def feasibility_agent_node(state: AgentState) -> AgentState:
