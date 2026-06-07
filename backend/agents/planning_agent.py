@@ -79,6 +79,8 @@ Rules:
 - Do NOT include markdown blocks outside the JSON.
 - Respond with ONLY the JSON object, nothing else.
 
+{rag_section}
+
 Here are the requirements:
 ---
 {requirements}
@@ -90,7 +92,7 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Planning Agent Function
 # -----------------------------------------------------------------
-def run_planning_agent(requirements: dict) -> PlanningAgentOutput:
+def run_planning_agent(requirements: dict, rag_context: str = "") -> PlanningAgentOutput:
     """
     Runs the Planning Agent on the provided requirements.
 
@@ -107,10 +109,13 @@ def run_planning_agent(requirements: dict) -> PlanningAgentOutput:
         raise ValueError("Requirements cannot be empty.")
 
     # Build the prompt
-    prompt = PLANNING_AGENT_PROMPT.format(requirements=json.dumps(requirements, indent=2))
+    prompt = PLANNING_AGENT_PROMPT.format(
+        requirements=json.dumps(requirements, indent=2),
+        rag_section=rag_context,
+    )
 
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=True)
+    raw_text = generate_with_fallback(prompt, use_search=True, agent_name="planning_agent")
 
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):

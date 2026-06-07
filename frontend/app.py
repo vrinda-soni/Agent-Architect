@@ -1,23 +1,43 @@
 import sys
 from pathlib import Path
- 
+
 # Add root folder to sys.path if not present to ensure backend imports work
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.append(str(root_dir))
- 
+
 import html
 import io
+import json
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import backend.supabase as db
-from backend.agents.task_agent import run_task_agent
-from backend.agents.planning_agent import run_planning_agent
-from backend.agents.feasibility_agent import run_feasibility_agent
-from backend.agents.estimation_agent import run_estimation_agent
-from backend.agents.report_agent import run_report_agent
+from backend.api.client import (
+    call_task_agent,
+    call_planning_agent,
+    call_feasibility_agent,
+    call_estimation_agent,
+    call_report_agent,
+)
 from backend.report_generator import generate_docx, generate_pdf, generate_json, generate_markdown
+from backend.rag.ingestion import ingest_document, delete_project_documents, list_project_documents
+
+
+# ── Cached DB helpers (avoid repeated Supabase round-trips per render) ────────
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_get_projects(user_id: str):
+    return db.get_projects(user_id)
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_get_transcript(project_id: str):
+    return db.get_transcript(project_id)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_list_documents(project_id: str):
+    return list_project_documents(project_id)
+
 
 COMPLEXITY_BADGES = {
     "low": ("🟢", "Low"),
@@ -39,17 +59,32 @@ def level_badge_html(level: str, badge_map: dict) -> str:
     return f'<div class="level-badge">{emoji} {label}</div>'
 
 
-def render_mermaid_diagram(diagram: str, height: int = 540) -> None:
+def _sanitize_mermaid(diagram: str) -> str:
+    """Robustly clean LLM-generated mermaid diagrams for mermaid.js v10."""
     cleaned = diagram.strip()
+    # Strip markdown code fence
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").strip()
         if cleaned.startswith("mermaid"):
             cleaned = cleaned[7:].strip()
-    # Fix LLM-generated single-line mermaid with semicolons
-    if ";" in cleaned and "\n" not in cleaned:
-        cleaned = cleaned.replace(";", "\n")
-    elif ";" in cleaned:
-        cleaned = cleaned.replace(";", "\n")
+    # Replace semicolons with newlines (LLM often uses semicolons as separators)
+    cleaned = cleaned.replace(";", "\n")
+    # Normalise escaped newlines (\n literal in JSON strings)
+    cleaned = cleaned.replace("\\n", "\n")
+    # Collapse multiple blank lines to single
+    import re
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    # Ensure diagram starts with a valid declaration
+    first_line = cleaned.split("\n")[0].strip().lower()
+    valid_starts = ("flowchart", "graph ", "sequencediagram", "classDiagram",
+                    "statediagram", "erdiagram", "gantt", "pie", "mindmap")
+    if not any(first_line.startswith(v.lower()) for v in valid_starts):
+        cleaned = "flowchart TD\n" + cleaned
+    return cleaned.strip()
+
+
+def render_mermaid_diagram(diagram: str, height: int = 540) -> None:
+    cleaned = _sanitize_mermaid(diagram)
     safe_diagram = html.escape(cleaned)
     components.html(
         f"""<!DOCTYPE html>
@@ -401,7 +436,7 @@ def render_task_agent_section(transcript: str, project_id: str):
     if run_clicked:
         with st.spinner("🤖 Gemini is analyzing the transcript..."):
             try:
-                result = run_task_agent(transcript)
+                result = call_task_agent(transcript)
                 st.session_state.task_output = result
                 st.session_state.approved_requirements = None
                 reset_planning_pipeline()
@@ -466,7 +501,7 @@ def render_task_agent_section(transcript: str, project_id: str):
             if st.button("🔄 Regenerate", use_container_width=True, key="regen_btn"):
                 with st.spinner("🤖 Regenerating..."):
                     try:
-                        result = run_task_agent(transcript)
+                        result = call_task_agent(transcript)
                         st.session_state.task_output = result
                         st.session_state.approved_requirements = None
                         reset_planning_pipeline()
@@ -534,7 +569,8 @@ def render_planning_agent_section():
     if st.button("▶ Run Planning Agent", type="primary", key="run_planning_agent_btn"):
         with st.spinner("🏗️ Gemini is designing the architecture..."):
             try:
-                result = run_planning_agent(st.session_state.approved_requirements)
+                _pid = (st.session_state.selected_project or {}).get("id")
+                result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
                 st.session_state.plan_output = result
                 st.session_state.feasibility_output = None
                 st.session_state.approved_plan = None
@@ -604,7 +640,7 @@ def render_feasibility_section():
     if st.button("▶ Run Feasibility Agent", type="primary", key="run_feasibility_agent_btn"):
         with st.spinner("🔍 Gemini is assessing feasibility..."):
             try:
-                result = run_feasibility_agent(
+                result = call_feasibility_agent(
                     st.session_state.approved_requirements,
                     st.session_state.plan_output.model_dump(),
                 )
@@ -689,10 +725,12 @@ def render_estimation_section():
     if st.button("▶ Run Estimation Agent", type="primary", key="run_estimation_agent_btn"):
         with st.spinner("📊 Gemini is calculating effort estimates..."):
             try:
-                result = run_estimation_agent(
+                _pid = (st.session_state.selected_project or {}).get("id")
+                result = call_estimation_agent(
                     st.session_state.approved_requirements,
                     st.session_state.plan_output.model_dump(),
                     st.session_state.feasibility_output.model_dump(),
+                    project_id=_pid,
                 )
                 st.session_state.estimation_output = result
                 st.session_state.approved_estimation = None
@@ -855,7 +893,8 @@ def render_hitl2_section():
         if st.button("🔄 Regenerate Plan", use_container_width=True, key="hitl2_regen_plan_btn"):
             with st.spinner("🏗️ Regenerating plan..."):
                 try:
-                    result = run_planning_agent(st.session_state.approved_requirements)
+                    _pid = (st.session_state.selected_project or {}).get("id")
+                    result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
                     st.session_state.plan_output = result
                     st.session_state.feasibility_output = None
                     st.session_state.estimation_output = None
@@ -871,7 +910,7 @@ def render_hitl2_section():
         if st.button("🔁 Re-run Feasibility", use_container_width=True, key="hitl2_rerun_feas_btn"):
             with st.spinner("🔍 Re-running feasibility..."):
                 try:
-                    result = run_feasibility_agent(
+                    result = call_feasibility_agent(
                         st.session_state.approved_requirements,
                         st.session_state.plan_output.model_dump(),
                     )
@@ -888,10 +927,12 @@ def render_hitl2_section():
         if st.button("📊 Regenerate Estimation", use_container_width=True, key="hitl2_regen_est_btn"):
             with st.spinner("📊 Regenerating estimation..."):
                 try:
-                    result = run_estimation_agent(
+                    _pid = (st.session_state.selected_project or {}).get("id")
+                    result = call_estimation_agent(
                         st.session_state.approved_requirements,
                         st.session_state.plan_output.model_dump(),
                         st.session_state.feasibility_output.model_dump(),
+                        project_id=_pid,
                     )
                     st.session_state.estimation_output = result
                     st.session_state.approved_estimation = None
@@ -1021,7 +1062,7 @@ def render_report_section():
         if st.button("▶ Generate Final Report", type="primary", use_container_width=True, key="run_report_btn"):
             with st.spinner("📝 Compiling final report..."):
                 try:
-                    result = run_report_agent(
+                    result = call_report_agent(
                         st.session_state.approved_requirements,
                         st.session_state.approved_plan or st.session_state.plan_output.model_dump(),
                         st.session_state.approved_feasibility or st.session_state.feasibility_output.model_dump(),
@@ -1133,14 +1174,15 @@ def render_dashboard():
         st.session_state.selected_project = None
         st.session_state.task_output = None
         st.session_state.approved_requirements = None
+        st.session_state["_transcript_exists"] = False
         reset_planning_pipeline()
         st.rerun()
- 
+
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📁 Project Management")
  
     try:
-        projects = db.get_projects(user.id)
+        projects = _cached_get_projects(user.id)
     except Exception as e:
         st.sidebar.error(f"Failed to fetch projects: {e}")
         projects = []
@@ -1154,23 +1196,38 @@ def render_dashboard():
                 selected_index = idx + 1
                 break
  
-    chosen_project_name = st.sidebar.selectbox(
-        "Select Active Project",
-        options=project_options,
-        index=selected_index,
-        key="project_selector"
-    )
- 
-    if chosen_project_name != "-- Select a Project --":
-        selected_project = next(p for p in projects if p["name"] == chosen_project_name)
-        if (not st.session_state.selected_project) or (st.session_state.selected_project["id"] != selected_project["id"]):
-            st.session_state.selected_project = selected_project
+    # Store for on_change callback (callbacks cannot read local variables)
+    st.session_state["_projects_list"] = projects
+
+    def _on_project_change():
+        chosen = st.session_state["project_selector"]
+        _projects = st.session_state.get("_projects_list", [])
+        if chosen == "-- Select a Project --":
+            st.session_state.selected_project = None
             st.session_state.task_output = None
             st.session_state.approved_requirements = None
             reset_planning_pipeline()
-            st.rerun()
-    else:
-        st.session_state.selected_project = None
+        else:
+            sel = next((p for p in _projects if p["name"] == chosen), None)
+            if sel is None:
+                st.session_state.selected_project = None
+            elif (
+                not st.session_state.selected_project
+                or st.session_state.selected_project["id"] != sel["id"]
+            ):
+                st.session_state.selected_project = sel
+                st.session_state.task_output = None
+                st.session_state.approved_requirements = None
+                st.session_state["_transcript_exists"] = False
+                reset_planning_pipeline()
+
+    st.sidebar.selectbox(
+        "Select Active Project",
+        options=project_options,
+        index=selected_index,
+        key="project_selector",
+        on_change=_on_project_change,
+    )
  
     st.sidebar.markdown("#### Create New Project")
     new_proj_name = st.sidebar.text_input("Project Name", placeholder="e.g. Client X - Core POC", key="new_proj_input")
@@ -1180,6 +1237,7 @@ def render_dashboard():
         else:
             try:
                 new_project = db.create_project(user.id, new_proj_name.strip())
+                _cached_get_projects.clear()
                 st.session_state.selected_project = new_project
                 st.session_state.task_output = None
                 st.session_state.approved_requirements = None
@@ -1189,6 +1247,53 @@ def render_dashboard():
             except Exception as e:
                 st.sidebar.error(f"Failed to create project: {e}")
  
+    # --- Reference Document Upload (RAG) ---
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📚 Reference Documents")
+    st.sidebar.caption("Optional — upload SOW, BRD, specs, or prior estimates to enrich AI context")
+
+    if st.session_state.selected_project:
+        _rag_pid = st.session_state.selected_project["id"]
+
+        uploaded_ref_files = st.sidebar.file_uploader(
+            "Upload reference docs",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            key="ref_doc_uploader",
+            label_visibility="collapsed",
+        )
+
+        if uploaded_ref_files:
+            if st.sidebar.button("📤 Ingest Documents", use_container_width=True, key="ingest_docs_btn"):
+                for _uf in uploaded_ref_files:
+                    _ext = _uf.name.rsplit(".", 1)[-1].lower()
+                    with st.sidebar:
+                        with st.spinner(f"Ingesting {_uf.name}…"):
+                            _res = ingest_document(_rag_pid, _uf.read(), _uf.name, _ext)
+                    if _res["success"]:
+                        _cached_list_documents.clear()
+                        st.sidebar.success(f"✅ {_uf.name}: {_res['chunks_inserted']} chunks")
+                    else:
+                        st.sidebar.error(f"❌ {_uf.name}: {_res.get('error', 'Failed')}")
+
+        try:
+            _existing_docs = _cached_list_documents(_rag_pid)
+            if _existing_docs:
+                st.sidebar.markdown("**Indexed docs:**")
+                for _rdoc in _existing_docs:
+                    _rc1, _rc2 = st.sidebar.columns([5, 1])
+                    _rc1.caption(f"📄 {_rdoc['document_name'][:28]}")
+                    if _rc2.button("✕", key=f"del_rdoc_{_rag_pid}_{_rdoc['document_name']}"):
+                        delete_project_documents(_rag_pid, _rdoc["document_name"])
+                        _cached_list_documents.clear()
+                        st.rerun()
+            else:
+                st.sidebar.caption("No documents indexed yet.")
+        except Exception:
+            st.sidebar.caption("Could not load document list.")
+    else:
+        st.sidebar.caption("Select a project to upload documents.")
+
     # --- Pipeline status in sidebar ---
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Pipeline Status")
@@ -1201,12 +1306,8 @@ def render_dashboard():
     estimation_approved_done = bool(st.session_state.approved_estimation)
     report_done = bool(st.session_state.report_output)
 
-    if st.session_state.selected_project:
-        try:
-            rec = db.get_transcript(st.session_state.selected_project["id"])
-            transcript_done = bool(rec and rec.get("content", "").strip())
-        except Exception:
-            pass
+    # Use session state flag set by the transcript section — avoids a sidebar Supabase call
+    transcript_done = bool(st.session_state.get("_transcript_exists", False))
 
     st.sidebar.markdown(f"{'✅' if transcript_done else '⬜'} Transcript Upload")
     st.sidebar.markdown(f"{'✅' if task_done else '⬜'} Task Agent")
@@ -1237,11 +1338,13 @@ def render_dashboard():
  
     existing_transcript = ""
     try:
-        transcript_record = db.get_transcript(project["id"])
+        transcript_record = _cached_get_transcript(project["id"])
         if transcript_record:
             existing_transcript = transcript_record.get("content", "")
+        st.session_state["_transcript_exists"] = bool(existing_transcript.strip())
     except Exception as e:
         st.error(f"Error fetching transcript: {e}")
+        st.session_state["_transcript_exists"] = False
  
     with col_left:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -1274,6 +1377,7 @@ def render_dashboard():
             else:
                 try:
                     db.upload_transcript(project["id"], transcript_content.strip())
+                    _cached_get_transcript.clear()
                     st.success("🎉 Transcript saved to Supabase!")
                     st.rerun()
                 except Exception as e:

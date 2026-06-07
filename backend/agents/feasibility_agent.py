@@ -85,7 +85,7 @@ def run_feasibility_agent(requirements: dict, plan: dict) -> FeasibilityAgentOut
     )
 
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=True)
+    raw_text = generate_with_fallback(prompt, use_search=True, agent_name="feasibility_agent")
 
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):

@@ -72,7 +72,7 @@ def run_task_agent(transcript: str) -> TaskAgentOutput:
     prompt = TASK_AGENT_PROMPT.format(transcript=transcript.strip())
  
     # Call LLM with fallback (Gemini -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=False)
+    raw_text = generate_with_fallback(prompt, use_search=False, agent_name="task_agent")
     
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):

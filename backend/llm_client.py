@@ -7,9 +7,12 @@ to OpenRouter models in order:
   1. moonshotai/kimi-k2.6:free
   2. google/gemma-4-31b-it:free
   3. google/gemma-4-26b-a4b-it:free
+
+All calls are traced via Langfuse when configured.
 """
 
 import os
+import time
 import requests
 from dotenv import load_dotenv
 from google import genai
@@ -25,6 +28,7 @@ if GEMINI_API_KEY:
     _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # Ordered list of fallback models
 FALLBACK_MODELS = [
@@ -41,16 +45,9 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
     """Check if an exception is a quota, rate-limit, or exhaustion error."""
     error_str = str(exc).lower()
     keywords = [
-        "quota",
-        "rate limit",
-        "exhausted",
-        "limit exceeded",
-        "429",
-        "403",
-        "resource exhausted",
-        "billing",
-        "insufficient quota",
-        "too many requests",
+        "quota", "rate limit", "exhausted", "limit exceeded",
+        "429", "403", "resource exhausted", "billing",
+        "insufficient quota", "too many requests",
     ]
     return any(kw in error_str for kw in keywords)
 
@@ -58,7 +55,7 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 # -----------------------------------------------------------------
 # OpenRouter call
 # -----------------------------------------------------------------
-def _call_openrouter(prompt: str, model: str) -> str:
+def _call_openrouter(prompt: str, model: str, generation=None) -> str:
     """Call OpenRouter with a specific model."""
     if not OPENROUTER_API_KEY:
         raise ValueError(
@@ -76,25 +73,40 @@ def _call_openrouter(prompt: str, model: str) -> str:
         "messages": [{"role": "user", "content": prompt}],
     }
 
-    resp = requests.post(
-        OPENROUTER_URL,
-        headers=headers,
-        json=payload,
-        timeout=180,
-    )
+    start = time.time()
+    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=180)
     resp.raise_for_status()
     data = resp.json()
+    elapsed = round(time.time() - start, 2)
 
     if "choices" not in data or not data["choices"]:
         raise ValueError(f"OpenRouter returned empty choices. Response: {data}")
 
-    return data["choices"][0]["message"]["content"]
+    output = data["choices"][0]["message"]["content"]
+
+    if generation:
+        try:
+            usage = data.get("usage", {})
+            generation.end(
+                output=output,
+                model=model,
+                usage={
+                    "input": usage.get("prompt_tokens"),
+                    "output": usage.get("completion_tokens"),
+                    "total": usage.get("total_tokens"),
+                },
+                metadata={"provider": "openrouter", "latency_s": elapsed},
+            )
+        except Exception:
+            pass
+
+    return output
 
 
 # -----------------------------------------------------------------
 # Gemini call
 # -----------------------------------------------------------------
-def _call_gemini(prompt: str, use_search: bool = False) -> str:
+def _call_gemini(prompt: str, use_search: bool = False, generation=None) -> str:
     """Call Gemini with optional Google Search grounding."""
     if not _gemini_client or not GEMINI_API_KEY:
         raise ValueError("Gemini API key is not set.")
@@ -103,54 +115,115 @@ def _call_gemini(prompt: str, use_search: bool = False) -> str:
     if use_search:
         config.tools = [{"google_search": {}}]
 
+    start = time.time()
     response = _gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=GEMINI_MODEL,
         contents=prompt,
         config=config,
     )
-    return response.text
+    elapsed = round(time.time() - start, 2)
+    output = response.text
+
+    if generation:
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            generation.end(
+                output=output,
+                model=GEMINI_MODEL,
+                usage={
+                    "input": getattr(usage, "prompt_token_count", None),
+                    "output": getattr(usage, "candidates_token_count", None),
+                    "total": getattr(usage, "total_token_count", None),
+                } if usage else None,
+                metadata={"provider": "gemini", "latency_s": elapsed, "search": use_search},
+            )
+        except Exception:
+            pass
+
+    return output
 
 
 # -----------------------------------------------------------------
-# Public API: generate with fallback
+# Public API: generate with fallback + Langfuse tracing
 # -----------------------------------------------------------------
-def generate_with_fallback(prompt: str, use_search: bool = False) -> str:
+def generate_with_fallback(
+    prompt: str,
+    use_search: bool = False,
+    trace=None,
+    agent_name: str = "llm_call",
+) -> str:
     """
     Generate text using Gemini first. If quota/rate-limit is hit,
     automatically fall back through the OpenRouter model chain.
+    All calls are traced via Langfuse when a trace object is provided.
 
     Args:
-        prompt: The full prompt text.
-        use_search: Whether to enable Google Search grounding on Gemini.
-                    Ignored for OpenRouter fallback.
+        prompt:      The full prompt text.
+        use_search:  Enable Google Search grounding on Gemini.
+        trace:       Optional Langfuse trace object (from create_trace()).
+        agent_name:  Label for this generation in Langfuse.
 
     Returns:
         Raw text response from the model.
-
-    Raises:
-        ValueError: If all models fail or keys are missing.
     """
+    from backend.langfuse_client import create_trace, flush
+
+    # Use provided trace or create a standalone one
+    active_trace = trace or create_trace(name=agent_name, metadata={"prompt_len": len(prompt)})
+
     # Try Gemini first
     if _gemini_client and GEMINI_API_KEY:
+        gen = None
         try:
-            return _call_gemini(prompt, use_search=use_search)
+            gen = active_trace.generation(
+                name=f"{agent_name}:gemini",
+                model=GEMINI_MODEL,
+                input=prompt,
+                metadata={"provider": "gemini"},
+            )
+            result = _call_gemini(prompt, use_search=use_search, generation=gen)
+            if trace is None:
+                flush()
+            return result
         except Exception as e:
+            if gen:
+                try:
+                    gen.end(level="ERROR", status_message=str(e))
+                except Exception:
+                    pass
             if _is_quota_or_rate_limit_error(e):
-                # Fall through to OpenRouter chain
-                pass
+                pass  # fall through to OpenRouter
             else:
-                # Non-quota error — re-raise so caller knows something else broke
+                if trace is None:
+                    flush()
                 raise
 
     # Fallback chain through OpenRouter models
     last_error = None
     for model in FALLBACK_MODELS:
+        gen = None
         try:
-            return _call_openrouter(prompt, model=model)
+            gen = active_trace.generation(
+                name=f"{agent_name}:{model.split('/')[0]}",
+                model=model,
+                input=prompt,
+                metadata={"provider": "openrouter"},
+            )
+            result = _call_openrouter(prompt, model=model, generation=gen)
+            if trace is None:
+                flush()
+            return result
         except Exception as e:
             last_error = e
-            # Continue to next fallback model
+            if gen:
+                try:
+                    gen.end(level="ERROR", status_message=str(e))
+                except Exception:
+                    pass
             continue
+
+    if trace is None:
+        flush()
 
     raise ValueError(
         f"All models failed (Gemini + {len(FALLBACK_MODELS)} OpenRouter fallbacks). "

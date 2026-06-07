@@ -40,3 +40,9 @@ Thumbs.db
 # Misc
 *.log
 *.tmp
+
+# Claude Code local settings (contains secrets)
+.claude/settings.local.json
+.mcp.json
+
+.claude

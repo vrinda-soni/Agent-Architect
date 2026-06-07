@@ -148,6 +148,8 @@ IMPORTANT:
 - Do not include markdown.
 - Do not include explanations outside the JSON.
 
+{rag_section}
+
 Here are the requirements:
 ---
 {requirements}
@@ -170,7 +172,7 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Estimation Agent Function
 # -----------------------------------------------------------------
-def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict) -> EstimationAgentOutput:
+def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict, rag_context: str = "") -> EstimationAgentOutput:
     """
     Runs the Estimation Agent on the provided requirements, plan, and feasibility.
 
@@ -192,11 +194,12 @@ def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict) -> E
     prompt = ESTIMATION_AGENT_PROMPT.format(
         requirements=json.dumps(requirements, indent=2),
         plan=json.dumps(plan, indent=2),
-        feasibility=json.dumps(feasibility, indent=2)
+        feasibility=json.dumps(feasibility, indent=2),
+        rag_section=rag_context,
     )
 
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=True)
+    raw_text = generate_with_fallback(prompt, use_search=True, agent_name="estimation_agent")
 
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):

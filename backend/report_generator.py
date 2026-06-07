@@ -16,9 +16,9 @@ from fpdf import FPDF
 
 class ReportPDF(FPDF):
     def header(self):
-        self.set_font("DejaVu", "B", 14)
+        self.set_font("Helvetica", "B", 14)
         self.set_text_color(102, 34, 255)
-        self.cell(0, 10, "AI-Powered POC Generator — Project Report", ln=True, align="C")
+        self.cell(0, 10, "AI-Powered POC Generator - Project Report", new_x="LMARGIN", new_y="NEXT", align="C")
         self.ln(2)
         self.set_draw_color(102, 34, 255)
         self.line(10, self.get_y(), 200, self.get_y())
@@ -26,37 +26,32 @@ class ReportPDF(FPDF):
 
     def footer(self):
         self.set_y(-15)
-        self.set_font("DejaVu", "", 8)
+        self.set_font("Helvetica", "", 8)
         self.set_text_color(128, 128, 128)
         self.cell(0, 10, f"Page {self.page_no()}", align="C")
 
     def chapter_title(self, title: str):
-        self.set_font("DejaVu", "B", 13)
+        self.set_font("Helvetica", "B", 13)
         self.set_text_color(0, 0, 0)
-        self.cell(0, 10, title, ln=True)
+        self.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
 
     def chapter_body(self, body: str):
-        self.set_font("DejaVu", "", 10)
+        self.set_font("Helvetica", "", 10)
         self.set_text_color(50, 50, 50)
-        self.multi_cell(0, 6, body)
+        # Encode to latin-1 safe string to avoid Unicode issues with core fonts
+        safe_body = body.encode("latin-1", errors="replace").decode("latin-1")
+        self.multi_cell(0, 6, safe_body)
         self.ln()
 
     def bullet_list(self, items: list):
-        self.set_font("DejaVu", "", 10)
+        self.set_font("Helvetica", "", 10)
         self.set_text_color(50, 50, 50)
         for item in items:
-            self.cell(5, 6, "•", ln=0)
-            self.multi_cell(0, 6, f" {item}")
+            safe_item = item.encode("latin-1", errors="replace").decode("latin-1")
+            self.cell(5, 6, "-", new_x="RIGHT", new_y="TOP")
+            self.multi_cell(0, 6, f" {safe_item}")
         self.ln()
-
-
-def _add_dejavu_fonts(pdf: FPDF):
-    """Register DejaVu fonts for Unicode support in PDF."""
-    # fpdf2 ships with DejaVu fonts built-in
-    pdf.add_font("DejaVu", "", "DejaVuSans.ttf", uni=True)
-    pdf.add_font("DejaVu", "B", "DejaVuSans-Bold.ttf", uni=True)
-    pdf.add_font("DejaVu", "I", "DejaVuSans-Oblique.ttf", uni=True)
 
 
 def generate_docx(report_data: dict) -> io.BytesIO:
@@ -112,15 +107,14 @@ def generate_docx(report_data: dict) -> io.BytesIO:
 def generate_pdf(report_data: dict) -> io.BytesIO:
     """Generate a PDF report file."""
     pdf = ReportPDF()
-    _add_dejavu_fonts(pdf)
     pdf.add_page()
 
-    pdf.set_font("DejaVu", "B", 16)
+    pdf.set_font("Helvetica", "B", 16)
     pdf.set_text_color(102, 34, 255)
-    pdf.cell(0, 10, "Project Report", ln=True, align="C")
-    pdf.set_font("DejaVu", "", 9)
+    pdf.cell(0, 10, "Project Report", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(128, 128, 128)
-    pdf.cell(0, 6, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align="C")
+    pdf.cell(0, 6, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
 
     def add_section(title: str, body: str):

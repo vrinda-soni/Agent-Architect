@@ -97,7 +97,7 @@ def run_report_agent(requirements: dict, plan: dict, feasibility: dict, estimati
         estimation=json.dumps(estimation, indent=2),
     )
 
-    raw_text = generate_with_fallback(prompt, use_search=False)
+    raw_text = generate_with_fallback(prompt, use_search=False, agent_name="report_agent")
 
     if raw_text.startswith("```"):
         raw_text = raw_text.strip("`").strip()
