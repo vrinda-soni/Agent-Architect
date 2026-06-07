@@ -1,21 +1,15 @@
 import os
 import json
-#import google.generativeai as genai
 from dotenv import load_dotenv
 from backend.schemas.task_schema import TaskAgentOutput
-from google import genai
+from backend.llm_client import generate_with_fallback
 
 # Load environment variables
 load_dotenv()
- 
-# Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is not set. Please add it to your .env file.")
- 
-client = genai.Client(
-    api_key=GEMINI_API_KEY
-)
+
+# Validate at least one API key is available
+if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():
+    raise ValueError("No API key found. Set GEMINI_API_KEY or OPENROUTER_API_KEY in your .env file.")
  
  
 # -----------------------------------------------------------------
@@ -77,13 +71,8 @@ def run_task_agent(transcript: str) -> TaskAgentOutput:
     # Build the prompt
     prompt = TASK_AGENT_PROMPT.format(transcript=transcript.strip())
  
-    # Initialize Gemini model
-    response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=prompt
-)
-
-    raw_text = response.text
+    # Call LLM with fallback (Gemini -> OpenRouter)
+    raw_text = generate_with_fallback(prompt, use_search=False)
     
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):

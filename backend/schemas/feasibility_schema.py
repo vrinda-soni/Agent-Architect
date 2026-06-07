@@ -25,7 +25,17 @@ class FeasibilityAgentOutput(BaseModel):
     
     complexity_level: str = Field(
         ...,
-        description="The estimated complexity of the project (e.g., 'Low', 'Medium', 'High')."
+        description="The estimated complexity of the project: 'Low', 'Medium', 'High', or 'Very High'."
+    )
+
+    architecture_confidence: str = Field(
+        ...,
+        description="Confidence in the proposed architecture fitting requirements: 'Low', 'Medium', or 'High'."
+    )
+
+    feasibility_confidence: str = Field(
+        ...,
+        description="Confidence that the plan can be delivered within constraints: 'Low', 'Medium', or 'High'."
     )
     
     technical_risks: List[TechnicalRisk] = Field(

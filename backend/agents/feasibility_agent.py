@@ -2,20 +2,14 @@ import os
 import json
 from dotenv import load_dotenv
 from backend.schemas.feasibility_schema import FeasibilityAgentOutput
-from google import genai
-from google.genai import types
+from backend.llm_client import generate_with_fallback
 
 # Load environment variables
 load_dotenv()
 
-# Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is not set. Please add it to your .env file.")
-
-client = genai.Client(
-    api_key=GEMINI_API_KEY
-)
+# Validate at least one API key is available
+if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():
+    raise ValueError("No API key found. Set GEMINI_API_KEY or OPENROUTER_API_KEY in your .env file.")
 
 # -----------------------------------------------------------------
 # Prompt Template
@@ -31,6 +25,8 @@ Return your response as a valid JSON object with this EXACT structure:
 {{
     "feasibility_summary": "...",
     "complexity_level": "...",
+    "architecture_confidence": "...",
+    "feasibility_confidence": "...",
     "technical_risks": [
         {{
             "risk": "...",
@@ -41,7 +37,11 @@ Return your response as a valid JSON object with this EXACT structure:
 }}
 
 Rules:
-- complexity_level should be a brief string like 'Low', 'Medium', 'High', or 'Very High'.
+- complexity_level must be exactly one of: 'Low', 'Medium', 'High', 'Very High'.
+- architecture_confidence must be exactly one of: 'Low', 'Medium', 'High'.
+  Rate how well the proposed architecture fits the stated requirements and constraints.
+- feasibility_confidence must be exactly one of: 'Low', 'Medium', 'High'.
+  Rate how deliverable the plan is within budget, timeline, and team constraints.
 - Do NOT include markdown blocks outside the JSON.
 - Respond with ONLY the JSON object, nothing else.
 
@@ -84,16 +84,8 @@ def run_feasibility_agent(requirements: dict, plan: dict) -> FeasibilityAgentOut
         plan=json.dumps(plan, indent=2)
     )
 
-    # Initialize Gemini model (Using Google Search grounding if needed for deep risk analysis)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[{"google_search": {}}]
-        )
-    )
-
-    raw_text = response.text
+    # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
+    raw_text = generate_with_fallback(prompt, use_search=True)
 
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):

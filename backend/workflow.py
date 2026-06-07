@@ -3,6 +3,7 @@ from backend.schemas.state_schema import AgentState
 from backend.agents.task_agent import run_task_agent
 from backend.agents.planning_agent import run_planning_agent
 from backend.agents.feasibility_agent import run_feasibility_agent
+from backend.agents.estimation_agent import run_estimation_agent
  
  
 # -----------------------------------------------------------------
@@ -61,18 +62,33 @@ def feasibility_agent_node(state: AgentState) -> AgentState:
  
 def hitl_2_node(state: AgentState) -> AgentState:
     """
-    HITL #2 pass-through node.
+    HITL #2 pass-through node (post-estimation review).
     The frontend sets hitl_action (and optionally feedback) in state before
-    resuming the graph. This node copies plan + feasibility -> approved_plan.
+    resuming the graph. This node copies estimation -> approved_estimation.
     """
-    plan = state.get("plan", {})
-    feasibility = state.get("feasibility", {})
+    estimation = state.get("estimation", {})
     return {
-        "approved_plan": {"plan": plan, "feasibility": feasibility},
+        "approved_estimation": estimation,
         "hitl_action": state.get("hitl_action", "approve"),
     }
- 
- 
+
+
+def estimation_agent_node(state: AgentState) -> AgentState:
+    """
+    Estimation Agent node.
+    Reads approved_requirements, plan, and feasibility, writes detailed effort estimation.
+    """
+    approved_requirements = state.get("approved_requirements", {})
+    plan = state.get("plan", {})
+    feasibility = state.get("feasibility", {})
+
+    if not approved_requirements or not plan or not feasibility:
+        raise ValueError("approved_requirements, plan, and feasibility are required for the Estimation Agent")
+
+    output = run_estimation_agent(approved_requirements, plan, feasibility)
+    return {"estimation": output.model_dump()}
+
+
 def report_agent_node(state: AgentState) -> AgentState:
     """
     Report Agent node — stub until report_agent.py is implemented.
@@ -108,14 +124,14 @@ def route_hitl_1(state: AgentState) -> str:
  
 def route_hitl_2(state: AgentState) -> str:
     """
-    Routes after HITL #2.
+    Routes after HITL #2 (post-estimation review).
     - approve / edit  -> report_agent
-    - regenerate      -> planning_agent
+    - regenerate      -> estimation_agent
     - unknown         -> report_agent (treat as approve)
     """
     action = state.get("hitl_action", "approve")
     if action == "regenerate":
-        return "planning_agent"
+        return "estimation_agent"
     return "report_agent"
  
  
@@ -131,15 +147,17 @@ _graph.add_node("hitl_1", hitl_1_node)
 _graph.add_node("planning_agent", planning_agent_node)
 _graph.add_node("feasibility_agent", feasibility_agent_node)
 _graph.add_node("hitl_2", hitl_2_node)
+_graph.add_node("estimation_agent", estimation_agent_node)
 _graph.add_node("report_agent", report_agent_node)
- 
+
 # Sequential edges
 _graph.add_edge(START, "task_agent")
 _graph.add_edge("task_agent", "hitl_1")
 _graph.add_edge("planning_agent", "feasibility_agent")
-_graph.add_edge("feasibility_agent", "hitl_2")
+_graph.add_edge("feasibility_agent", "estimation_agent")
+_graph.add_edge("estimation_agent", "hitl_2")
 _graph.add_edge("report_agent", END)
- 
+
 # Conditional edges for HITL checkpoints
 _graph.add_conditional_edges(
     "hitl_1",
@@ -149,7 +167,7 @@ _graph.add_conditional_edges(
 _graph.add_conditional_edges(
     "hitl_2",
     route_hitl_2,
-    {"planning_agent": "planning_agent", "report_agent": "report_agent"},
+    {"estimation_agent": "estimation_agent", "report_agent": "report_agent"},
 )
  
 # Compiled graph — exported for frontend / callers

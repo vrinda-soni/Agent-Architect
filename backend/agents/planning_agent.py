@@ -2,20 +2,14 @@ import os
 import json
 from dotenv import load_dotenv
 from backend.schemas.plan_schema import PlanningAgentOutput
-from google import genai
-from google.genai import types
+from backend.llm_client import generate_with_fallback
 
 # Load environment variables
 load_dotenv()
 
-# Configure Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY is not set. Please add it to your .env file.")
-
-client = genai.Client(
-    api_key=GEMINI_API_KEY
-)
+# Validate at least one API key is available
+if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():
+    raise ValueError("No API key found. Set GEMINI_API_KEY or OPENROUTER_API_KEY in your .env file.")
 
 # -----------------------------------------------------------------
 # Prompt Template
@@ -68,13 +62,18 @@ Return your response as a valid JSON object with this EXACT structure:
             "url": "..."
         }}
     ],
-    "mermaid_diagram": "graph TD; A-->B;"
+    "mermaid_diagram": "graph TD; Users[End Users] --> Portal[Client Portal]; Portal --> Platform[Core Platform]; Platform --> AI[AI Services]; Platform --> Data[(Data Store)];"
 }}
 
 Rules:
 - The tech_stack and recommendation_reason keys must match.
 - reference_docs must be a list of objects with title and url.
-- mermaid_diagram MUST be a valid Mermaid string mapping out the system architecture. Make sure to escape newlines correctly in JSON!
+- mermaid_diagram MUST be a valid, SIMPLE Mermaid flowchart using graph TD syntax.
+- The diagram must use BUSINESS-LEVEL component names only (5-8 nodes max).
+  Examples: "End Users", "Admin Portal", "Core Platform", "AI Engine", "Data Store", "External APIs".
+- Do NOT put framework or library names in the diagram (no React, FastAPI, PostgreSQL, etc.).
+- Keep node labels short (max 3 words). Use clear left-to-right or top-down flow.
+- Make sure to escape newlines correctly in JSON!
 - Do NOT include markdown blocks outside the JSON.
 - Respond with ONLY the JSON object, nothing else.
 
@@ -108,16 +107,8 @@ def run_planning_agent(requirements: dict) -> PlanningAgentOutput:
     # Build the prompt
     prompt = PLANNING_AGENT_PROMPT.format(requirements=json.dumps(requirements, indent=2))
 
-    # Initialize Gemini model with Google Search grounding
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[{"google_search": {}}]
-        )
-    )
-
-    raw_text = response.text
+    # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
+    raw_text = generate_with_fallback(prompt, use_search=True)
 
     # Clean up in case Gemini wraps output in markdown code blocks
     if raw_text.startswith("```"):
