@@ -16,6 +16,8 @@ from backend.agents.task_agent import run_task_agent
 from backend.agents.planning_agent import run_planning_agent
 from backend.agents.feasibility_agent import run_feasibility_agent
 from backend.agents.estimation_agent import run_estimation_agent
+from backend.agents.report_agent import run_report_agent
+from backend.report_generator import generate_docx, generate_pdf, generate_json, generate_markdown
 
 COMPLEXITY_BADGES = {
     "low": ("🟢", "Low"),
@@ -37,12 +39,17 @@ def level_badge_html(level: str, badge_map: dict) -> str:
     return f'<div class="level-badge">{emoji} {label}</div>'
 
 
-def render_mermaid_diagram(diagram: str, height: int = 440) -> None:
+def render_mermaid_diagram(diagram: str, height: int = 540) -> None:
     cleaned = diagram.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`").strip()
         if cleaned.startswith("mermaid"):
             cleaned = cleaned[7:].strip()
+    # Fix LLM-generated single-line mermaid with semicolons
+    if ";" in cleaned and "\n" not in cleaned:
+        cleaned = cleaned.replace(";", "\n")
+    elif ";" in cleaned:
+        cleaned = cleaned.replace(";", "\n")
     safe_diagram = html.escape(cleaned)
     components.html(
         f"""<!DOCTYPE html>
@@ -52,13 +59,17 @@ def render_mermaid_diagram(diagram: str, height: int = 440) -> None:
     <style>
         body {{
             margin: 0;
-            padding: 12px;
-            background: transparent;
+            padding: 16px;
+            background: #0e1117;
             font-family: 'Segoe UI', sans-serif;
         }}
         .mermaid {{
             display: flex;
             justify-content: center;
+        }}
+        .mermaid svg {{
+            max-width: 100%;
+            height: auto;
         }}
     </style>
 </head>
@@ -68,7 +79,17 @@ def render_mermaid_diagram(diagram: str, height: int = 440) -> None:
         mermaid.initialize({{
             startOnLoad: true,
             theme: "dark",
-            flowchart: {{ curve: "basis", padding: 16 }}
+            flowchart: {{ curve: "basis", padding: 20, useMaxWidth: true }},
+            themeVariables: {{
+                primaryColor: "#6622FF",
+                primaryTextColor: "#ffffff",
+                primaryBorderColor: "#FF3366",
+                lineColor: "#888899",
+                secondaryColor: "#FF9933",
+                tertiaryColor: "#00d4aa",
+                fontFamily: "'Segoe UI', sans-serif",
+                fontSize: "15px"
+            }}
         }});
     </script>
 </body>
@@ -272,6 +293,10 @@ if "estimation_output" not in st.session_state:
     st.session_state.estimation_output = None
 if "approved_estimation" not in st.session_state:
     st.session_state.approved_estimation = None
+if "approved_feasibility" not in st.session_state:
+    st.session_state.approved_feasibility = None
+if "report_output" not in st.session_state:
+    st.session_state.report_output = None
 
 
 def reset_planning_pipeline():
@@ -280,8 +305,13 @@ def reset_planning_pipeline():
     st.session_state.approved_plan = None
     st.session_state.estimation_output = None
     st.session_state.approved_estimation = None
+    st.session_state.approved_feasibility = None
+    st.session_state.report_output = None
     st.session_state.pop("hitl2_edit_mode", None)
     st.session_state.pop("hitl_est_edit_mode", None)
+    st.session_state.pop("hitl2_plan_edit", None)
+    st.session_state.pop("hitl2_feas_edit", None)
+    st.session_state.pop("hitl2_est_edit", None)
  
 # -------------------------------------------------------------
 # Authentication Screen
@@ -630,40 +660,6 @@ def render_feasibility_section():
         else:
             st.info("No technical risks identified.")
 
-        st.markdown("---")
-        st.markdown("#### 🔄 Refinement Actions")
-        st.markdown("You can refine the plan or feasibility before proceeding to estimation:")
-
-        hitl_col1, hitl_col2 = st.columns(2)
-
-        with hitl_col1:
-            if st.button("🔄 Regenerate Plan", use_container_width=True, key="regen_plan_btn"):
-                with st.spinner("🏗️ Regenerating plan..."):
-                    try:
-                        result = run_planning_agent(st.session_state.approved_requirements)
-                        st.session_state.plan_output = result
-                        st.session_state.feasibility_output = None
-                        st.session_state.estimation_output = None
-                        st.session_state.approved_estimation = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Plan regeneration failed: {e}")
-
-        with hitl_col2:
-            if st.button("🔁 Re-run Feasibility", use_container_width=True, key="rerun_feasibility_btn"):
-                with st.spinner("🔍 Re-running feasibility..."):
-                    try:
-                        result = run_feasibility_agent(
-                            st.session_state.approved_requirements,
-                            st.session_state.plan_output.model_dump(),
-                        )
-                        st.session_state.feasibility_output = result
-                        st.session_state.estimation_output = None
-                        st.session_state.approved_estimation = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Feasibility re-run failed: {e}")
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -780,38 +776,340 @@ def render_estimation_section():
             file_name="effort_estimation.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+            key="dl_est_excel",
         )
 
-        # HITL #2 Actions
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# -------------------------------------------------------------
+# Unified HITL #2: Review Plan + Feasibility + Estimation
+# -------------------------------------------------------------
+def render_hitl2_section():
+    st.markdown("---")
+    st.markdown("### 🧑‍💼 HITL #2: Final Review")
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        "Review and approve **Planning**, **Feasibility**, and **Estimation** outputs before generating the final report."
+    )
+
+    # Show summary tabs
+    tab_plan, tab_feas, tab_est = st.tabs(["🏗️ Plan", "🔍 Feasibility", "📊 Estimation"])
+
+    with tab_plan:
+        plan = st.session_state.plan_output
+        st.markdown(f"**Architecture:** {plan.architecture_type}")
+        if plan.tech_stack:
+            st.json(plan.tech_stack)
+        summary = plan.architecture_summary
+        st.markdown(f"**Overview:** {summary.overview}")
+        st.markdown(f"**Workflow:** {summary.workflow}")
+        st.markdown(f"**Data Flow:** {summary.data_flow}")
+
+    with tab_feas:
+        feas = st.session_state.feasibility_output
+        st.markdown(f"**Complexity:** {feas.complexity_level}")
+        st.markdown(f"**Summary:** {feas.feasibility_summary}")
+        if feas.technical_risks:
+            for risk in feas.technical_risks:
+                st.markdown(f"- **{risk.risk}** — Impact: {risk.impact}")
+
+    with tab_est:
+        est = st.session_state.estimation_output
+        rows = []
+        for idx, item in enumerate(est.estimations, start=1):
+            rows.append({
+                "No": f"A.{idx-1}",
+                "Functionality Type": item.functionality_type,
+                "Module": item.module,
+                "Features": item.feature,
+                "Complexity": item.complexity,
+                "HTML": item.html_hours,
+                "ReactJS": item.react_hours,
+                "Python": item.python_hours,
+                "AI": item.ai_hours,
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        totals = est.totals
+        st.markdown(
+            f"**Totals:** HTML={totals.html_hours}  ReactJS={totals.react_hours}  Python={totals.python_hours}  AI={totals.ai_hours}"
+        )
+
+    # Action buttons
+    st.markdown("---")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    with c1:
+        if st.button("✅ Approve Everything", type="primary", use_container_width=True, key="hitl2_approve_btn"):
+            st.session_state.approved_plan = st.session_state.plan_output.model_dump()
+            st.session_state.approved_feasibility = st.session_state.feasibility_output.model_dump()
+            st.session_state.approved_estimation = st.session_state.estimation_output.model_dump()
+            st.session_state.pop("hitl2_edit_mode", None)
+            st.success("All outputs approved! Generating report...")
+            st.rerun()
+
+    with c2:
+        if st.button("🔄 Regenerate Plan", use_container_width=True, key="hitl2_regen_plan_btn"):
+            with st.spinner("🏗️ Regenerating plan..."):
+                try:
+                    result = run_planning_agent(st.session_state.approved_requirements)
+                    st.session_state.plan_output = result
+                    st.session_state.feasibility_output = None
+                    st.session_state.estimation_output = None
+                    st.session_state.approved_plan = None
+                    st.session_state.approved_feasibility = None
+                    st.session_state.approved_estimation = None
+                    st.session_state.report_output = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Plan regeneration failed: {e}")
+
+    with c3:
+        if st.button("🔁 Re-run Feasibility", use_container_width=True, key="hitl2_rerun_feas_btn"):
+            with st.spinner("🔍 Re-running feasibility..."):
+                try:
+                    result = run_feasibility_agent(
+                        st.session_state.approved_requirements,
+                        st.session_state.plan_output.model_dump(),
+                    )
+                    st.session_state.feasibility_output = result
+                    st.session_state.estimation_output = None
+                    st.session_state.approved_feasibility = None
+                    st.session_state.approved_estimation = None
+                    st.session_state.report_output = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Feasibility re-run failed: {e}")
+
+    with c4:
+        if st.button("📊 Regenerate Estimation", use_container_width=True, key="hitl2_regen_est_btn"):
+            with st.spinner("📊 Regenerating estimation..."):
+                try:
+                    result = run_estimation_agent(
+                        st.session_state.approved_requirements,
+                        st.session_state.plan_output.model_dump(),
+                        st.session_state.feasibility_output.model_dump(),
+                    )
+                    st.session_state.estimation_output = result
+                    st.session_state.approved_estimation = None
+                    st.session_state.report_output = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Estimation regeneration failed: {e}")
+
+    with c5:
+        if st.button("✏️ Edit Manually", use_container_width=True, key="hitl2_edit_btn"):
+            st.session_state["hitl2_edit_mode"] = True
+
+    # Edit Manually Mode
+    if st.session_state.get("hitl2_edit_mode"):
         st.markdown("---")
-        st.markdown("#### 🧑‍💼 HITL #2: Review Estimation")
-        st.markdown("Review the effort estimates above and choose an action:")
+        st.markdown("#### ✏️ Edit Outputs Manually")
 
-        hitl_col1, hitl_col2 = st.columns(2)
+        edit_plan, edit_feas, edit_est = st.tabs(["Edit Plan", "Edit Feasibility", "Edit Estimation"])
 
-        with hitl_col1:
-            if st.button("✅ Approve Estimation", type="primary", use_container_width=True, key="approve_est_btn"):
-                st.session_state.approved_estimation = estimation.model_dump()
-                st.success("Estimation approved!")
+        with edit_plan:
+            plan_json = st.text_area(
+                "Plan JSON (edit carefully)",
+                value=json.dumps(st.session_state.plan_output.model_dump(), indent=2),
+                height=300,
+                key="hitl2_plan_edit",
+            )
+
+        with edit_feas:
+            feas_json = st.text_area(
+                "Feasibility JSON (edit carefully)",
+                value=json.dumps(st.session_state.feasibility_output.model_dump(), indent=2),
+                height=300,
+                key="hitl2_feas_edit",
+            )
+
+        with edit_est:
+            est = st.session_state.estimation_output
+            est_rows = []
+            for idx, item in enumerate(est.estimations, start=1):
+                est_rows.append({
+                    "No": f"A.{idx-1}",
+                    "Functionality Type": item.functionality_type,
+                    "Module": item.module,
+                    "Features": item.feature,
+                    "Complexity": item.complexity,
+                    "Interface Type": item.interface_type,
+                    "HTML": item.html_hours,
+                    "ReactJS": item.react_hours,
+                    "Python": item.python_hours,
+                    "AI": item.ai_hours,
+                    "Remarks Tech": item.tech_remarks,
+                    "Remarks BA": item.ba_remarks,
+                })
+            est_df = pd.DataFrame(est_rows)
+            edited_est_df = st.data_editor(est_df, num_rows="dynamic", use_container_width=True, key="hitl2_est_edit_df")
+
+        if st.button("💾 Save Edits & Approve", type="primary", key="hitl2_save_edits_btn"):
+            import json
+            try:
+                from backend.schemas.plan_schema import PlanningAgentOutput
+                from backend.schemas.feasibility_schema import FeasibilityAgentOutput
+                from backend.schemas.estimation_schema import EstimationAgentOutput, EstimationItem, EstimationTotals
+
+                new_plan = PlanningAgentOutput(**json.loads(plan_json))
+                new_feas = FeasibilityAgentOutput(**json.loads(feas_json))
+
+                # Rebuild estimation from edited dataframe
+                new_estimations = []
+                for _, row in edited_est_df.iterrows():
+                    new_estimations.append(EstimationItem(
+                        functionality_type=str(row.get("Functionality Type", "")),
+                        module=str(row.get("Module", "")),
+                        feature=str(row.get("Features", "")),
+                        complexity=str(row.get("Complexity", "")),
+                        interface_type=str(row.get("Interface Type", "")),
+                        html_hours=int(row.get("HTML", 0) or 0),
+                        react_hours=int(row.get("ReactJS", 0) or 0),
+                        python_hours=int(row.get("Python", 0) or 0),
+                        ai_hours=int(row.get("AI", 0) or 0),
+                        tech_remarks=str(row.get("Remarks Tech", "")),
+                        ba_remarks=str(row.get("Remarks BA", "")),
+                    ))
+
+                total_html = sum(e.html_hours for e in new_estimations)
+                total_react = sum(e.react_hours for e in new_estimations)
+                total_python = sum(e.python_hours for e in new_estimations)
+                total_ai = sum(e.ai_hours for e in new_estimations)
+
+                new_est = EstimationAgentOutput(
+                    estimations=new_estimations,
+                    totals=EstimationTotals(
+                        html_hours=total_html,
+                        react_hours=total_react,
+                        python_hours=total_python,
+                        ai_hours=total_ai,
+                    ),
+                )
+
+                st.session_state.plan_output = new_plan
+                st.session_state.feasibility_output = new_feas
+                st.session_state.estimation_output = new_est
+                st.session_state.approved_plan = new_plan.model_dump()
+                st.session_state.approved_feasibility = new_feas.model_dump()
+                st.session_state.approved_estimation = new_est.model_dump()
+                st.session_state["hitl2_edit_mode"] = False
+                st.success("✅ Edits saved and all outputs approved!")
                 st.rerun()
+            except Exception as e:
+                st.error(f"Failed to save edits: {e}")
 
-        with hitl_col2:
-            if st.button("🔄 Regenerate Estimation", use_container_width=True, key="regen_est_btn"):
-                with st.spinner("📊 Regenerating estimation..."):
-                    try:
-                        result = run_estimation_agent(
-                            st.session_state.approved_requirements,
-                            st.session_state.plan_output.model_dump(),
-                            st.session_state.feasibility_output.model_dump(),
-                        )
-                        st.session_state.estimation_output = result
-                        st.session_state.approved_estimation = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Estimation regeneration failed: {e}")
+    if st.session_state.approved_estimation and not st.session_state.get("hitl2_edit_mode"):
+        st.success("🎉 All outputs are **approved**! Report generation is the next phase.")
 
-        if st.session_state.approved_estimation:
-            st.success("🎉 Estimation is **approved**! Report generation is the next phase.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# -------------------------------------------------------------
+# Report Agent Section
+# -------------------------------------------------------------
+def render_report_section():
+    st.markdown("---")
+    st.markdown("### 📋 Step 7: Final Report")
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<div class="accent-bar-purple"></div>', unsafe_allow_html=True)
+
+    if not st.session_state.report_output:
+        if st.button("▶ Generate Final Report", type="primary", use_container_width=True, key="run_report_btn"):
+            with st.spinner("📝 Compiling final report..."):
+                try:
+                    result = run_report_agent(
+                        st.session_state.approved_requirements,
+                        st.session_state.approved_plan or st.session_state.plan_output.model_dump(),
+                        st.session_state.approved_feasibility or st.session_state.feasibility_output.model_dump(),
+                        st.session_state.approved_estimation,
+                    )
+                    st.session_state.report_output = result
+                    st.success("✅ Final Report generated successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Report Agent failed: {e}")
+    else:
+        report = st.session_state.report_output
+
+        st.markdown("#### 📄 Executive Summary")
+        st.markdown(report.executive_summary)
+
+        st.markdown("#### 📋 Requirements Summary")
+        st.markdown(report.requirements_summary)
+
+        st.markdown("#### 🏗️ Architecture Overview")
+        st.markdown(report.architecture_overview)
+
+        st.markdown("#### 🔍 Feasibility Assessment")
+        st.markdown(report.feasibility_assessment)
+
+        st.markdown("#### 📊 Effort Estimation Summary")
+        st.markdown(report.effort_estimation_summary)
+
+        if report.recommendations:
+            st.markdown("#### 💡 Recommendations")
+            for rec in report.recommendations:
+                st.markdown(f"- {rec}")
+
+        if report.sections:
+            for section in report.sections:
+                st.markdown(f"#### {section.title}")
+                st.markdown(section.content)
+
+        st.markdown("---")
+        st.markdown("#### 📥 Download Report")
+
+        report_data = report.model_dump()
+
+        d1, d2, d3, d4 = st.columns(4)
+
+        with d1:
+            docx_buffer = generate_docx(report_data)
+            st.download_button(
+                label="📄 Word (.docx)",
+                data=docx_buffer,
+                file_name="project_report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="dl_docx",
+            )
+
+        with d2:
+            pdf_buffer = generate_pdf(report_data)
+            st.download_button(
+                label="📕 PDF (.pdf)",
+                data=pdf_buffer,
+                file_name="project_report.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="dl_pdf",
+            )
+
+        with d3:
+            json_buffer = generate_json(report_data)
+            st.download_button(
+                label="📋 JSON (.json)",
+                data=json_buffer,
+                file_name="project_report.json",
+                mime="application/json",
+                use_container_width=True,
+                key="dl_json",
+            )
+
+        with d4:
+            md_buffer = generate_markdown(report_data)
+            st.download_button(
+                label="📝 Markdown (.md)",
+                data=md_buffer,
+                file_name="project_report.md",
+                mime="text/markdown",
+                use_container_width=True,
+                key="dl_md",
+            )
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -901,6 +1199,7 @@ def render_dashboard():
     feasibility_done = bool(st.session_state.feasibility_output)
     estimation_done = bool(st.session_state.estimation_output)
     estimation_approved_done = bool(st.session_state.approved_estimation)
+    report_done = bool(st.session_state.report_output)
 
     if st.session_state.selected_project:
         try:
@@ -915,8 +1214,8 @@ def render_dashboard():
     st.sidebar.markdown(f"{'✅' if plan_done else '⬜'} Planning Agent")
     st.sidebar.markdown(f"{'✅' if feasibility_done else '⬜'} Feasibility Agent")
     st.sidebar.markdown(f"{'✅' if estimation_done else '⬜'} Estimation Agent")
-    st.sidebar.markdown(f"{'✅' if estimation_approved_done else '⬜'} HITL #2 (Estimation)")
-    st.sidebar.markdown(f"{'⬜'} Report Agent")
+    st.sidebar.markdown(f"{'✅' if estimation_approved_done else '⬜'} HITL #2 (Final Review)")
+    st.sidebar.markdown(f"{'✅' if report_done else '⬜'} Report Agent")
  
     # --- Main Content ---
     st.markdown('<div class="main-title">⚡ AI-Powered POC Generator</div>', unsafe_allow_html=True)
@@ -1019,12 +1318,20 @@ def render_dashboard():
         st.markdown("---")
         st.info("📌 Run the Planning Agent above to enable the Feasibility Study.")
 
-    # ── Step 5: Estimation Agent + HITL #2 ────────────────────
+    # ── Step 5: Estimation Agent ──────────────────────────────
     if st.session_state.plan_output and st.session_state.feasibility_output:
         render_estimation_section()
     elif st.session_state.approved_requirements:
         st.markdown("---")
         st.info("📌 Run the Feasibility Agent above to enable the Estimation Agent.")
+
+    # ── Step 6: HITL #2 (Unified Review) ──────────────────────
+    if st.session_state.plan_output and st.session_state.feasibility_output and st.session_state.estimation_output:
+        render_hitl2_section()
+
+    # ── Step 7: Report Agent ──────────────────────────────────
+    if st.session_state.approved_estimation:
+        render_report_section()
 
 # -------------------------------------------------------------
 # Page router

@@ -4,6 +4,7 @@ from backend.agents.task_agent import run_task_agent
 from backend.agents.planning_agent import run_planning_agent
 from backend.agents.feasibility_agent import run_feasibility_agent
 from backend.agents.estimation_agent import run_estimation_agent
+from backend.agents.report_agent import run_report_agent
  
  
 # -----------------------------------------------------------------
@@ -91,18 +92,19 @@ def estimation_agent_node(state: AgentState) -> AgentState:
 
 def report_agent_node(state: AgentState) -> AgentState:
     """
-    Report Agent node — stub until report_agent.py is implemented.
-    Reads approved_requirements, approved_plan, feasibility, writes report.
+    Report Agent node.
+    Reads approved_requirements, plan, feasibility, and estimation, writes report.
     """
-    # TODO: replace with real report agent call once implemented
-    return {
-        "report": {
-            "_stub": True,
-            "approved_requirements": state.get("approved_requirements", {}),
-            "approved_plan": state.get("approved_plan", {}),
-            "feasibility": state.get("feasibility", {}),
-        }
-    }
+    approved_requirements = state.get("approved_requirements", {})
+    plan = state.get("approved_plan") or state.get("plan", {})
+    feasibility = state.get("approved_feasibility") or state.get("feasibility", {})
+    estimation = state.get("approved_estimation") or state.get("estimation", {})
+
+    if not all([approved_requirements, plan, feasibility, estimation]):
+        raise ValueError("approved_requirements, plan, feasibility, and estimation are required for the Report Agent")
+
+    output = run_report_agent(approved_requirements, plan, feasibility, estimation)
+    return {"report": output.model_dump()}
  
  
 # -----------------------------------------------------------------

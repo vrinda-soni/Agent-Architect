@@ -62,18 +62,20 @@ Return your response as a valid JSON object with this EXACT structure:
             "url": "..."
         }}
     ],
-    "mermaid_diagram": "graph TD; Users[End Users] --> Portal[Client Portal]; Portal --> Platform[Core Platform]; Platform --> AI[AI Services]; Platform --> Data[(Data Store)];"
+    "mermaid_diagram": "flowchart TD\\n    Users[End Users] --> Portal[Client Portal]\\n    Portal --> Platform[Core Platform]\\n    Platform --> AI[AI Services]\\n    Platform --> Data[(Data Store)]"
 }}
 
 Rules:
 - The tech_stack and recommendation_reason keys must match.
 - reference_docs must be a list of objects with title and url.
-- mermaid_diagram MUST be a valid, SIMPLE Mermaid flowchart using graph TD syntax.
+- mermaid_diagram MUST be a valid, SIMPLE Mermaid flowchart using flowchart TD syntax.
 - The diagram must use BUSINESS-LEVEL component names only (5-8 nodes max).
   Examples: "End Users", "Admin Portal", "Core Platform", "AI Engine", "Data Store", "External APIs".
 - Do NOT put framework or library names in the diagram (no React, FastAPI, PostgreSQL, etc.).
 - Keep node labels short (max 3 words). Use clear left-to-right or top-down flow.
-- Make sure to escape newlines correctly in JSON!
+- CRITICAL: Each mermaid statement must be on its OWN LINE separated by \\n (newlines).
+- Do NOT use semicolons (;) to separate statements. Use newlines only.
+- Do NOT wrap the diagram in markdown code blocks inside the JSON string.
 - Do NOT include markdown blocks outside the JSON.
 - Respond with ONLY the JSON object, nothing else.
 

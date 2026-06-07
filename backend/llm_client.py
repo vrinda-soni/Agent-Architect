@@ -1,9 +1,12 @@
 """
 llm_client.py
 -------------
-Unified LLM client with Gemini primary and OpenRouter fallback.
+Unified LLM client with Gemini primary and OpenRouter fallback chain.
 If Gemini API quota/rate-limit is exceeded, automatically falls back
-to OpenRouter using moonshotai/kimi-k2.6:free.
+to OpenRouter models in order:
+  1. moonshotai/kimi-k2.6:free
+  2. google/gemma-4-31b-it:free
+  3. google/gemma-4-26b-a4b-it:free
 """
 
 import os
@@ -21,8 +24,14 @@ _gemini_client = None
 if GEMINI_API_KEY:
     _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-OPENROUTER_MODEL = "moonshotai/kimi-k2.6:free"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Ordered list of fallback models
+FALLBACK_MODELS = [
+    "moonshotai/kimi-k2.6:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+]
 
 
 # -----------------------------------------------------------------
@@ -49,8 +58,8 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 # -----------------------------------------------------------------
 # OpenRouter call
 # -----------------------------------------------------------------
-def _call_openrouter(prompt: str) -> str:
-    """Call OpenRouter with the fallback model."""
+def _call_openrouter(prompt: str, model: str) -> str:
+    """Call OpenRouter with a specific model."""
     if not OPENROUTER_API_KEY:
         raise ValueError(
             "OpenRouter API key is not set. Please add OPENROUTER_API_KEY to your .env file."
@@ -63,7 +72,7 @@ def _call_openrouter(prompt: str) -> str:
         "X-Title": "AI-Powered POC Generator",
     }
     payload = {
-        "model": OPENROUTER_MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
 
@@ -108,7 +117,7 @@ def _call_gemini(prompt: str, use_search: bool = False) -> str:
 def generate_with_fallback(prompt: str, use_search: bool = False) -> str:
     """
     Generate text using Gemini first. If quota/rate-limit is hit,
-    automatically fall back to OpenRouter (moonshotai/kimi-k2.6:free).
+    automatically fall back through the OpenRouter model chain.
 
     Args:
         prompt: The full prompt text.
@@ -119,7 +128,7 @@ def generate_with_fallback(prompt: str, use_search: bool = False) -> str:
         Raw text response from the model.
 
     Raises:
-        ValueError: If both Gemini and OpenRouter fail or keys are missing.
+        ValueError: If all models fail or keys are missing.
     """
     # Try Gemini first
     if _gemini_client and GEMINI_API_KEY:
@@ -127,16 +136,23 @@ def generate_with_fallback(prompt: str, use_search: bool = False) -> str:
             return _call_gemini(prompt, use_search=use_search)
         except Exception as e:
             if _is_quota_or_rate_limit_error(e):
-                # Fall through to OpenRouter
+                # Fall through to OpenRouter chain
                 pass
             else:
                 # Non-quota error — re-raise so caller knows something else broke
                 raise
 
-    # Fallback to OpenRouter
-    try:
-        return _call_openrouter(prompt)
-    except Exception as e:
-        raise ValueError(
-            f"Both Gemini and OpenRouter failed. Last error: {e}"
-        ) from e
+    # Fallback chain through OpenRouter models
+    last_error = None
+    for model in FALLBACK_MODELS:
+        try:
+            return _call_openrouter(prompt, model=model)
+        except Exception as e:
+            last_error = e
+            # Continue to next fallback model
+            continue
+
+    raise ValueError(
+        f"All models failed (Gemini + {len(FALLBACK_MODELS)} OpenRouter fallbacks). "
+        f"Last error: {last_error}"
+    ) from last_error
