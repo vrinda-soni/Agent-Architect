@@ -41,16 +41,25 @@ class ReportPDF(FPDF):
         self.set_text_color(50, 50, 50)
         # Encode to latin-1 safe string to avoid Unicode issues with core fonts
         safe_body = body.encode("latin-1", errors="replace").decode("latin-1")
+        # Truncate very long bodies to prevent rendering issues
+        if len(safe_body) > 5000:
+            safe_body = safe_body[:4997] + "..."
         self.multi_cell(0, 6, safe_body)
         self.ln()
 
     def bullet_list(self, items: list):
         self.set_font("Helvetica", "", 10)
         self.set_text_color(50, 50, 50)
+        page_width = self.w - self.l_margin - self.r_margin
         for item in items:
             safe_item = item.encode("latin-1", errors="replace").decode("latin-1")
+            # Truncate very long unbreakable strings to prevent horizontal space errors
+            if len(safe_item) > 200:
+                safe_item = safe_item[:197] + "..."
+            x_start = self.get_x()
             self.cell(5, 6, "-", new_x="RIGHT", new_y="TOP")
-            self.multi_cell(0, 6, f" {safe_item}")
+            # Use explicit width to ensure proper wrapping
+            self.multi_cell(page_width - 5, 6, f" {safe_item}")
         self.ln()
 
 

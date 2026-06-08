@@ -1,11 +1,7 @@
 import os
 import json
-from dotenv import load_dotenv
 from backend.schemas.feasibility_schema import FeasibilityAgentOutput
 from backend.llm_client import generate_with_fallback
-
-# Load environment variables
-load_dotenv()
 
 # Validate at least one API key is available
 if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():

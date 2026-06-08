@@ -21,7 +21,7 @@ from backend.api.client import (
     call_report_agent,
 )
 from backend.report_generator import generate_docx, generate_pdf, generate_json, generate_markdown
-from backend.rag.ingestion import ingest_document, delete_project_documents, list_project_documents
+from backend.rag.ingestion import ingest_document, delete_project_documents, list_project_documents, extract_text
 
 
 # ── Cached DB helpers (avoid repeated Supabase round-trips per render) ────────
@@ -61,6 +61,7 @@ def level_badge_html(level: str, badge_map: dict) -> str:
 
 def _sanitize_mermaid(diagram: str) -> str:
     """Robustly clean LLM-generated mermaid diagrams for mermaid.js v10."""
+    import re
     cleaned = diagram.strip()
     # Strip markdown code fence
     if cleaned.startswith("```"):
@@ -71,15 +72,26 @@ def _sanitize_mermaid(diagram: str) -> str:
     cleaned = cleaned.replace(";", "\n")
     # Normalise escaped newlines (\n literal in JSON strings)
     cleaned = cleaned.replace("\\n", "\n")
-    # Collapse multiple blank lines to single
-    import re
+    # Remove special characters that break mermaid syntax
+    cleaned = re.sub(r'[^\x20-\x7E\n\t]', '', cleaned)  # Keep only printable ASCII
+    # Remove problematic characters that cause syntax errors
+    cleaned = cleaned.replace('"', "'")  # Replace double quotes with single
+    cleaned = re.sub(r'[{}\[\]]', '', cleaned)  # Remove braces that can cause issues
+    # Fix common LLM mistakes
+    cleaned = re.sub(r'-->', '-->', cleaned)  # Normalize arrows
+    cleaned = re.sub(r'--+>', '-->', cleaned)  # Fix multiple dashes
+    cleaned = re.sub(r'-{3,}', '--', cleaned)  # Limit consecutive dashes
+    # Remove empty lines and collapse multiple blank lines
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     # Ensure diagram starts with a valid declaration
     first_line = cleaned.split("\n")[0].strip().lower()
-    valid_starts = ("flowchart", "graph ", "sequencediagram", "classDiagram",
+    valid_starts = ("flowchart", "graph ", "sequencediagram", "classdiagram",
                     "statediagram", "erdiagram", "gantt", "pie", "mindmap")
     if not any(first_line.startswith(v.lower()) for v in valid_starts):
         cleaned = "flowchart TD\n" + cleaned
+    # Remove any trailing whitespace on each line
+    lines = [line.rstrip() for line in cleaned.split("\n")]
+    cleaned = "\n".join(lines)
     return cleaned.strip()
 
 
@@ -1351,7 +1363,11 @@ def render_dashboard():
         st.markdown('<div class="accent-bar-purple"></div>', unsafe_allow_html=True)
         st.markdown("#### 📄 Transcript Input")
  
-        uploaded_file = st.file_uploader("Upload Meeting Transcript (.txt)", type=["txt"], key="transcript_uploader")
+        uploaded_file = st.file_uploader(
+            "Upload Meeting Transcript (PDF, DOCX, or TXT)",
+            type=["txt", "pdf", "docx"],
+            key="transcript_uploader"
+        )
  
         pasted_text = st.text_area(
             "Or Paste Transcript here",
@@ -1364,8 +1380,11 @@ def render_dashboard():
         transcript_content = ""
         if uploaded_file is not None:
             try:
-                transcript_content = uploaded_file.read().decode("utf-8")
-                st.info(f"📎 File '{uploaded_file.name}' loaded.")
+                file_bytes = uploaded_file.read()
+                file_ext = uploaded_file.name.rsplit(".", 1)[-1].lower() if "." in uploaded_file.name else "txt"
+                # Use extract_text to handle PDF, DOCX, and TXT formats
+                transcript_content = extract_text(file_bytes, file_ext)
+                st.info(f"📎 File '{uploaded_file.name}' loaded ({len(transcript_content)} characters extracted).")
             except Exception as e:
                 st.error(f"Failed to read file: {e}")
         else:

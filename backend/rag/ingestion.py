@@ -52,10 +52,11 @@ def chunk_text(text: str) -> list[str]:
 def _embed_gemini(text: str) -> list[float]:
     client = _gemini_client()
     result = client.models.embed_content(
-        model="text-embedding-004",
+        model="models/text-embedding-004",
         contents=text,
     )
-    return result.embeddings[0].values  # 768-dim
+    # Convert to native Python floats for JSON serialization
+    return [float(v) for v in result.embeddings[0].values]  # 768-dim
 
 
 def _embed_hf_bge(text: str) -> list[float]:
@@ -65,7 +66,8 @@ def _embed_hf_bge(text: str) -> list[float]:
     result = client.feature_extraction(text, model="BAAI/bge-m3")
     # result may be nested list or 2-D array — flatten to 1-D
     embedding = result[0] if hasattr(result[0], "__iter__") else result
-    return list(embedding)[:768]
+    # Convert to native Python floats for JSON serialization
+    return [float(v) for v in embedding[:768]]
 
 
 def _embed(text: str) -> list[float]:

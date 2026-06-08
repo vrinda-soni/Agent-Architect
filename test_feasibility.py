@@ -1,8 +1,15 @@
 import json
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+# Read .env file manually
+env_file = ".env"
+if os.path.exists(env_file):
+    with open(env_file, 'r') as f:
+        for line in f:
+            if '=' in line and not line.startswith('#'):
+                key, val = line.strip().split('=', 1)
+                os.environ[key] = val
+
 if "GEMINI_API_KEY" not in os.environ:
     print("Error: GEMINI_API_KEY not found in environment.")
     exit(1)
