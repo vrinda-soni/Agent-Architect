@@ -9,7 +9,7 @@ from backend.schemas.estimation_schema import EstimationAgentOutput
 from backend.schemas.report_schema import ReportAgentOutput
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
-TIMEOUT = 300  # 5 min — LLM calls can be slow
+TIMEOUT = 600  # 10 min — report agent can be slow with large inputs
 
 
 def _post(path: str, payload: dict) -> dict:

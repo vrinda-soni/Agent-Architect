@@ -74,7 +74,7 @@ def _call_openrouter(prompt: str, model: str, generation=None) -> str:
     }
 
     start = time.time()
-    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=180)
+    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=300)
     resp.raise_for_status()
     data = resp.json()
     elapsed = round(time.time() - start, 2)

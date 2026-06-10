@@ -342,6 +342,8 @@ if "approved_estimation" not in st.session_state:
     st.session_state.approved_estimation = None
 if "approved_feasibility" not in st.session_state:
     st.session_state.approved_feasibility = None
+if "approved_plan" not in st.session_state:
+    st.session_state.approved_plan = None
 if "report_output" not in st.session_state:
     st.session_state.report_output = None
 
@@ -350,9 +352,9 @@ def reset_planning_pipeline():
     st.session_state.plan_output = None
     st.session_state.feasibility_output = None
     st.session_state.approved_plan = None
+    st.session_state.approved_feasibility = None
     st.session_state.estimation_output = None
     st.session_state.approved_estimation = None
-    st.session_state.approved_feasibility = None
     st.session_state.report_output = None
     st.session_state.pop("hitl2_edit_mode", None)
     st.session_state.pop("hitl_est_edit_mode", None)
@@ -462,36 +464,45 @@ def render_task_agent_section(transcript: str, project_id: str):
         output = st.session_state.task_output
  
         st.markdown("#### 📋 Extracted Requirements — Please Review")
- 
-        tab1, tab2, tab3, tab4 = st.tabs(["🔴 Pain Points", "✅ Requirements", "⚠️ Constraints", "🎯 Business Goals"])
- 
+        
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔴 Pain Points", "✅ Requirements", "⚠️ Constraints", "🎯 Business Goals", "💻 Tech Context"])
+        
         with tab1:
             if output.pain_points:
                 for item in output.pain_points:
                     st.markdown(f'<div class="pain-item">• {item}</div>', unsafe_allow_html=True)
             else:
                 st.info("No pain points identified.")
- 
+        
         with tab2:
             if output.requirements:
                 for item in output.requirements:
                     st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
             else:
                 st.info("No requirements identified.")
- 
+        
         with tab3:
             if output.constraints:
                 for item in output.constraints:
                     st.markdown(f'<div class="constraint-item">• {item}</div>', unsafe_allow_html=True)
             else:
                 st.info("No constraints identified.")
- 
+        
         with tab4:
             if output.business_goals:
                 for item in output.business_goals:
                     st.markdown(f'<div class="goal-item">• {item}</div>', unsafe_allow_html=True)
             else:
                 st.info("No business goals identified.")
+        
+        with tab5:
+            tech_ctx = getattr(output, 'technology_context', {}) or {}
+            if tech_ctx:
+                for category, description in tech_ctx.items():
+                    label = category.replace("_", " ").title()
+                    st.markdown(f'<div class="requirement-item"><strong>{label}:</strong> {description}</div>', unsafe_allow_html=True)
+            else:
+                st.info("No technology context identified.")
  
         # ---------------------------------------------------------
         # HITL Actions
@@ -532,14 +543,28 @@ def render_task_agent_section(transcript: str, project_id: str):
             edited_reqs = st.text_area("Requirements (one per line)", value="\n".join(output.requirements), height=120, key="edit_reqs")
             edited_cons = st.text_area("Constraints (one per line)", value="\n".join(output.constraints), height=80, key="edit_cons")
             edited_goals = st.text_area("Business Goals (one per line)", value="\n".join(output.business_goals), height=100, key="edit_goals")
- 
+                    
+            # Technology context editing
+            tech_ctx = getattr(output, 'technology_context', {}) or {}
+            tech_lines = [f"{k}: {v}" for k, v in tech_ctx.items()]
+            edited_tech = st.text_area("Technology Context (key: value, one per line)", value="\n".join(tech_lines), height=100, key="edit_tech")
+        
             if st.button("💾 Save Edits & Approve", type="primary", key="save_edits_btn"):
                 from backend.schemas.task_schema import TaskAgentOutput
+                # Parse technology context
+                tech_dict = {}
+                for line in edited_tech.split("\n"):
+                    line = line.strip()
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        tech_dict[k.strip()] = v.strip()
+                        
                 edited_output = TaskAgentOutput(
                     pain_points=[x.strip() for x in edited_pain.split("\n") if x.strip()],
                     requirements=[x.strip() for x in edited_reqs.split("\n") if x.strip()],
                     constraints=[x.strip() for x in edited_cons.split("\n") if x.strip()],
                     business_goals=[x.strip() for x in edited_goals.split("\n") if x.strip()],
+                    technology_context=tech_dict,
                 )
                 st.session_state.task_output = edited_output
                 st.session_state.approved_requirements = edited_output.model_dump()
@@ -756,63 +781,69 @@ def render_estimation_section():
 
         st.markdown("#### 📋 Development Effort Estimation")
 
+        # Get dynamic tech categories
+        tech_categories = estimation.tech_categories or []
+
         # Build DataFrame for display and export
         rows = []
         for idx, item in enumerate(estimation.estimations, start=1):
-            rows.append({
+            row = {
                 "No": f"A.{idx-1}",
                 "Functionality Type": item.functionality_type,
                 "Module": item.module,
                 "Features": item.feature,
                 "Complexity": item.complexity,
                 "Interface Type": item.interface_type,
-                "HTML": item.html_hours,
-                "ReactJS": item.react_hours,
-                "Python": item.python_hours,
-                "AI": item.ai_hours,
-                "Remarks Tech": item.tech_remarks,
-                "Remarks BA": item.ba_remarks,
-            })
+            }
+            # Add dynamic tech hours columns
+            for cat in tech_categories:
+                row[cat] = item.tech_hours.get(cat, 0)
+            row["Remarks Tech"] = item.tech_remarks
+            row["Remarks BA"] = item.ba_remarks
+            rows.append(row)
 
         # Add totals row
         totals = estimation.totals
-        rows.append({
+        totals_row = {
             "No": "",
             "Functionality Type": "",
             "Module": "",
             "Features": "**TOTALS**",
             "Complexity": "",
             "Interface Type": "",
-            "HTML": totals.html_hours,
-            "ReactJS": totals.react_hours,
-            "Python": totals.python_hours,
-            "AI": totals.ai_hours,
-            "Remarks Tech": "",
-            "Remarks BA": "",
-        })
+        }
+        for cat in tech_categories:
+            totals_row[cat] = totals.tech_totals.get(cat, 0)
+        totals_row["Remarks Tech"] = ""
+        totals_row["Remarks BA"] = ""
+        rows.append(totals_row)
 
         df = pd.DataFrame(rows)
+
+        # Build dynamic column config
+        column_config = {
+            "No": st.column_config.TextColumn("No", width="small"),
+            "Functionality Type": st.column_config.TextColumn("Functionality Type", width="medium"),
+            "Module": st.column_config.TextColumn("Module", width="medium"),
+            "Features": st.column_config.TextColumn("Features", width="large"),
+            "Complexity": st.column_config.TextColumn("Complexity", width="small"),
+            "Interface Type": st.column_config.TextColumn("Interface Type", width="medium"),
+        }
+        for cat in tech_categories:
+            column_config[cat] = st.column_config.NumberColumn(cat, width="small")
+        column_config["Remarks Tech"] = st.column_config.TextColumn("Remarks Tech", width="medium")
+        column_config["Remarks BA"] = st.column_config.TextColumn("Remarks BA", width="medium")
 
         # Display styled table
         st.dataframe(
             df,
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "No": st.column_config.TextColumn("No", width="small"),
-                "Functionality Type": st.column_config.TextColumn("Functionality Type", width="medium"),
-                "Module": st.column_config.TextColumn("Module", width="medium"),
-                "Features": st.column_config.TextColumn("Features", width="large"),
-                "Complexity": st.column_config.TextColumn("Complexity", width="small"),
-                "Interface Type": st.column_config.TextColumn("Interface Type", width="medium"),
-                "HTML": st.column_config.NumberColumn("HTML", width="small"),
-                "ReactJS": st.column_config.NumberColumn("ReactJS", width="small"),
-                "Python": st.column_config.NumberColumn("Python", width="small"),
-                "AI": st.column_config.NumberColumn("AI", width="small"),
-                "Remarks Tech": st.column_config.TextColumn("Remarks Tech", width="medium"),
-                "Remarks BA": st.column_config.TextColumn("Remarks BA", width="medium"),
-            },
+            column_config=column_config,
         )
+
+        # Grand total display
+        st.markdown(f"**Grand Total: {totals.grand_total_hours} hours**")
 
         # Excel download
         buffer = io.BytesIO()
@@ -1072,96 +1103,240 @@ def render_report_section():
 
     if not st.session_state.report_output:
         if st.button("▶ Generate Final Report", type="primary", use_container_width=True, key="run_report_btn"):
-            with st.spinner("📝 Compiling final report..."):
-                try:
-                    result = call_report_agent(
-                        st.session_state.approved_requirements,
-                        st.session_state.approved_plan or st.session_state.plan_output.model_dump(),
-                        st.session_state.approved_feasibility or st.session_state.feasibility_output.model_dump(),
-                        st.session_state.approved_estimation,
-                    )
-                    st.session_state.report_output = result
-                    st.success("✅ Final Report generated successfully!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Report Agent failed: {e}")
+            approved_req = st.session_state.approved_requirements or {}
+            approved_plan = st.session_state.approved_plan or (st.session_state.plan_output.model_dump() if st.session_state.plan_output else {})
+            approved_feas = st.session_state.approved_feasibility or (st.session_state.feasibility_output.model_dump() if st.session_state.feasibility_output else {})
+            approved_est = st.session_state.approved_estimation or (st.session_state.estimation_output.model_dump() if st.session_state.estimation_output else {})
+
+            st.session_state.report_output = {
+                "requirements": approved_req,
+                "plan": approved_plan,
+                "feasibility": approved_feas,
+                "estimation": approved_est,
+            }
+            st.success("✅ Final Report compiled successfully!")
+            st.rerun()
     else:
         report = st.session_state.report_output
+        req_data = report.get("requirements", {})
+        plan_data = report.get("plan", {})
+        feas_data = report.get("feasibility", {})
+        est_data = report.get("estimation", {})
 
-        st.markdown("#### 📄 Executive Summary")
-        st.markdown(report.executive_summary)
+        # ── 1. REQUIREMENTS (same as Task Agent output) ──
+        st.markdown("#### 📋 Requirements Analysis")
+        if req_data:
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔴 Pain Points", "✅ Requirements", "⚠️ Constraints", "🎯 Business Goals", "💻 Tech Context"])
+            with tab1:
+                for item in req_data.get("pain_points", []):
+                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
+            with tab2:
+                for item in req_data.get("requirements", []):
+                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
+            with tab3:
+                for item in req_data.get("constraints", []):
+                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
+            with tab4:
+                for item in req_data.get("business_goals", []):
+                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
+            with tab5:
+                tech_ctx = req_data.get("technology_context", {})
+                if tech_ctx:
+                    for category, description in tech_ctx.items():
+                        label = category.replace("_", " ").title()
+                        st.markdown(f'<div class="requirement-item"><strong>{label}:</strong> {description}</div>', unsafe_allow_html=True)
+                else:
+                    st.info("No technology context extracted.")
+        else:
+            st.info("No requirements data.")
 
-        st.markdown("#### 📋 Requirements Summary")
-        st.markdown(report.requirements_summary)
+        st.markdown("---")
 
-        st.markdown("#### 🏗️ Architecture Overview")
-        st.markdown(report.architecture_overview)
+        # ── 2. PLANNING (same as Planning Agent output) ──
+        st.markdown("#### 🏗️ Architecture & Planning")
+        if plan_data:
+            st.markdown(f"##### 🧩 Architecture: **{plan_data.get('architecture_type', 'N/A')}**")
 
+            tech_stack = plan_data.get("tech_stack", {})
+            rec_reasons = plan_data.get("recommendation_reason", {})
+            if tech_stack:
+                st.markdown("##### 🛠️ Tech Stack")
+                for category, tech in tech_stack.items():
+                    reason = rec_reasons.get(category, "")
+                    label = category.replace("_", " ").title()
+                    st.markdown(f"**{label}:** {tech}")
+                    if reason:
+                        st.caption(reason)
+
+            arch_summary = plan_data.get("architecture_summary", {})
+            if arch_summary:
+                st.markdown("##### 📐 Architecture Summary")
+                st.markdown(f"**Overview:** {arch_summary.get('overview', '')}")
+                st.markdown(f"**Workflow:** {arch_summary.get('workflow', '')}")
+                st.markdown(f"**Data Flow:** {arch_summary.get('data_flow', '')}")
+
+            ref_docs = plan_data.get("reference_docs", [])
+            if ref_docs:
+                st.markdown("##### 📚 Reference Docs")
+                for doc in ref_docs:
+                    st.markdown(f"- [{doc.get('title', '')}]({doc.get('url', '')})")
+
+            mermaid = plan_data.get("mermaid_diagram", "")
+            if mermaid:
+                st.markdown("##### 🗺️ Architecture Diagram")
+                with st.expander("📊 View Architecture Diagram", expanded=True):
+                    render_mermaid_diagram(mermaid)
+                with st.expander("📝 Diagram Source (Mermaid)", expanded=False):
+                    st.code(mermaid, language="mermaid")
+        else:
+            st.info("No planning data.")
+
+        st.markdown("---")
+
+        # ── 3. FEASIBILITY (same as Feasibility Agent output) ──
         st.markdown("#### 🔍 Feasibility Assessment")
-        st.markdown(report.feasibility_assessment)
+        if feas_data:
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            with metric_col1:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.markdown('<div class="metric-label">Complexity</div>', unsafe_allow_html=True)
+                st.markdown(level_badge_html(feas_data.get("complexity_level", ""), COMPLEXITY_BADGES), unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown("#### 📊 Effort Estimation Summary")
-        st.markdown(report.effort_estimation_summary)
+            arch_confidence = feas_data.get("architecture_confidence")
+            feas_confidence = feas_data.get("feasibility_confidence")
 
-        if report.recommendations:
-            st.markdown("#### 💡 Recommendations")
-            for rec in report.recommendations:
-                st.markdown(f"- {rec}")
+            with metric_col2:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.markdown('<div class="metric-label">Architecture Confidence</div>', unsafe_allow_html=True)
+                if arch_confidence:
+                    st.markdown(level_badge_html(arch_confidence, CONFIDENCE_BADGES), unsafe_allow_html=True)
+                else:
+                    st.caption("N/A")
+                st.markdown('</div>', unsafe_allow_html=True)
 
-        if report.sections:
-            for section in report.sections:
-                st.markdown(f"#### {section.title}")
-                st.markdown(section.content)
+            with metric_col3:
+                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                st.markdown('<div class="metric-label">Feasibility Confidence</div>', unsafe_allow_html=True)
+                if feas_confidence:
+                    st.markdown(level_badge_html(feas_confidence, CONFIDENCE_BADGES), unsafe_allow_html=True)
+                else:
+                    st.caption("N/A")
+                st.markdown('</div>', unsafe_allow_html=True)
 
+            feas_summary = feas_data.get("feasibility_summary", "")
+            if feas_summary:
+                st.markdown(f"**Summary:** {feas_summary}")
+
+            risks = feas_data.get("technical_risks", [])
+            if risks:
+                st.markdown("##### ⚠️ Technical Risks")
+                for risk in risks:
+                    with st.expander(f"🔴 {risk.get('risk', '')}", expanded=False):
+                        st.markdown(f"**Impact:** {risk.get('impact', '')}")
+                        st.markdown(f"**Mitigation:** {risk.get('mitigation', '')}")
+            else:
+                st.info("No technical risks identified.")
+        else:
+            st.info("No feasibility data.")
+
+        st.markdown("---")
+
+        # ── 4. ESTIMATION (same as Estimation Agent output) ──
+        st.markdown("#### 📊 Effort Estimation")
+        if est_data:
+            estimations = est_data.get("estimations", [])
+            tech_categories = est_data.get("tech_categories", [])
+            totals = est_data.get("totals", {})
+
+            if estimations:
+                rows = []
+                for idx, item in enumerate(estimations, start=1):
+                    row = {
+                        "No": f"A.{idx-1}",
+                        "Functionality Type": item.get("functionality_type", ""),
+                        "Module": item.get("module", ""),
+                        "Features": item.get("feature", ""),
+                        "Complexity": item.get("complexity", ""),
+                        "Interface Type": item.get("interface_type", ""),
+                    }
+                    for cat in tech_categories:
+                        row[cat] = item.get("tech_hours", {}).get(cat, 0)
+                    row["Remarks Tech"] = item.get("tech_remarks", "")
+                    row["Remarks BA"] = item.get("ba_remarks", "")
+                    rows.append(row)
+
+                totals_row = {
+                    "No": "", "Functionality Type": "", "Module": "",
+                    "Features": "**TOTALS**", "Complexity": "", "Interface Type": "",
+                }
+                for cat in tech_categories:
+                    totals_row[cat] = totals.get("tech_totals", {}).get(cat, 0)
+                totals_row["Remarks Tech"] = ""
+                totals_row["Remarks BA"] = ""
+                rows.append(totals_row)
+
+                df = pd.DataFrame(rows)
+
+                column_config = {
+                    "No": st.column_config.TextColumn("No", width="small"),
+                    "Functionality Type": st.column_config.TextColumn("Functionality Type", width="medium"),
+                    "Module": st.column_config.TextColumn("Module", width="medium"),
+                    "Features": st.column_config.TextColumn("Features", width="large"),
+                    "Complexity": st.column_config.TextColumn("Complexity", width="small"),
+                    "Interface Type": st.column_config.TextColumn("Interface Type", width="medium"),
+                }
+                for cat in tech_categories:
+                    column_config[cat] = st.column_config.NumberColumn(cat, width="small")
+                column_config["Remarks Tech"] = st.column_config.TextColumn("Remarks Tech", width="medium")
+                column_config["Remarks BA"] = st.column_config.TextColumn("Remarks BA", width="medium")
+
+                st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config)
+                st.markdown(f"**Grand Total: {totals.get('grand_total_hours', 0)} hours**")
+
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                    df.to_excel(writer, index=False, sheet_name="Estimation")
+                buffer.seek(0)
+                st.download_button(
+                    label="📥 Download Estimation as Excel",
+                    data=buffer,
+                    file_name="effort_estimation.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dl_report_est_excel",
+                )
+            else:
+                st.info("No estimation data.")
+        else:
+            st.info("No estimation data.")
+
+        # ── 5. DOWNLOADS ──
         st.markdown("---")
         st.markdown("#### 📥 Download Report")
 
-        report_data = report.model_dump()
-
-        d1, d2, d3, d4 = st.columns(4)
+        json_buffer = generate_json(report)
+        d1, d2 = st.columns(2)
 
         with d1:
-            docx_buffer = generate_docx(report_data)
-            st.download_button(
-                label="📄 Word (.docx)",
-                data=docx_buffer,
-                file_name="project_report.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-                key="dl_docx",
-            )
-
-        with d2:
-            pdf_buffer = generate_pdf(report_data)
-            st.download_button(
-                label="📕 PDF (.pdf)",
-                data=pdf_buffer,
-                file_name="project_report.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                key="dl_pdf",
-            )
-
-        with d3:
-            json_buffer = generate_json(report_data)
             st.download_button(
                 label="📋 JSON (.json)",
                 data=json_buffer,
                 file_name="project_report.json",
                 mime="application/json",
                 use_container_width=True,
-                key="dl_json",
+                key="dl_report_json",
             )
 
-        with d4:
-            md_buffer = generate_markdown(report_data)
+        with d2:
+            md_buffer = generate_markdown(report)
             st.download_button(
                 label="📝 Markdown (.md)",
                 data=md_buffer,
                 file_name="project_report.md",
                 mime="text/markdown",
                 use_container_width=True,
-                key="dl_md",
+                key="dl_report_md",
             )
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1309,25 +1484,26 @@ def render_dashboard():
     # --- Pipeline status in sidebar ---
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚡ Pipeline Status")
-    transcript_done = False
+
+    # Use session state flag set by the transcript section — avoids a sidebar Supabase call
+    transcript_done = bool(st.session_state.get("_transcript_exists", False))
     task_done = bool(st.session_state.task_output)
     approved_done = bool(st.session_state.approved_requirements)
     plan_done = bool(st.session_state.plan_output)
     feasibility_done = bool(st.session_state.feasibility_output)
+    feasibility_approved_done = bool(st.session_state.get("approved_feasibility"))
     estimation_done = bool(st.session_state.estimation_output)
     estimation_approved_done = bool(st.session_state.approved_estimation)
     report_done = bool(st.session_state.report_output)
-
-    # Use session state flag set by the transcript section — avoids a sidebar Supabase call
-    transcript_done = bool(st.session_state.get("_transcript_exists", False))
 
     st.sidebar.markdown(f"{'✅' if transcript_done else '⬜'} Transcript Upload")
     st.sidebar.markdown(f"{'✅' if task_done else '⬜'} Task Agent")
     st.sidebar.markdown(f"{'✅' if approved_done else '⬜'} HITL #1 (Requirements)")
     st.sidebar.markdown(f"{'✅' if plan_done else '⬜'} Planning Agent")
     st.sidebar.markdown(f"{'✅' if feasibility_done else '⬜'} Feasibility Agent")
+    st.sidebar.markdown(f"{'✅' if feasibility_approved_done else '⬜'} HITL #2 (Feasibility)")
     st.sidebar.markdown(f"{'✅' if estimation_done else '⬜'} Estimation Agent")
-    st.sidebar.markdown(f"{'✅' if estimation_approved_done else '⬜'} HITL #2 (Final Review)")
+    st.sidebar.markdown(f"{'✅' if estimation_approved_done else '⬜'} HITL #3 (Estimation)")
     st.sidebar.markdown(f"{'✅' if report_done else '⬜'} Report Agent")
  
     # --- Main Content ---
@@ -1441,16 +1617,111 @@ def render_dashboard():
         st.markdown("---")
         st.info("📌 Run the Planning Agent above to enable the Feasibility Study.")
 
-    # ── Step 5: Estimation Agent ──────────────────────────────
+    # ── Step 4b: HITL #2 — Approve Plan + Feasibility ─────────
     if st.session_state.plan_output and st.session_state.feasibility_output:
-        render_estimation_section()
-    elif st.session_state.approved_requirements:
         st.markdown("---")
-        st.info("📌 Run the Feasibility Agent above to enable the Estimation Agent.")
+        st.markdown("### 🧑‍💼 HITL #2: Review Plan & Feasibility")
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
+        st.markdown("Review the Planning and Feasibility outputs before proceeding to Estimation.")
 
-    # ── Step 6: HITL #2 (Unified Review) ──────────────────────
-    if st.session_state.plan_output and st.session_state.feasibility_output and st.session_state.estimation_output:
-        render_hitl2_section()
+        hitl2_col1, hitl2_col2, hitl2_col3 = st.columns(3)
+
+        with hitl2_col1:
+            if st.button("✅ Approve Plan & Feasibility", type="primary", use_container_width=True, key="hitl2_approve_plan_feas_btn"):
+                st.session_state.approved_plan = st.session_state.plan_output.model_dump()
+                st.session_state.approved_feasibility = st.session_state.feasibility_output.model_dump()
+                st.success("Plan and Feasibility approved! Ready for Estimation Agent.")
+                st.rerun()
+
+        with hitl2_col2:
+            if st.button("🔄 Regenerate Plan", use_container_width=True, key="hitl2_regen_plan_btn"):
+                with st.spinner("🏗️ Regenerating plan..."):
+                    try:
+                        _pid = (st.session_state.selected_project or {}).get("id")
+                        result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
+                        st.session_state.plan_output = result
+                        st.session_state.feasibility_output = None
+                        st.session_state.approved_plan = None
+                        st.session_state.approved_feasibility = None
+                        st.session_state.estimation_output = None
+                        st.session_state.approved_estimation = None
+                        st.session_state.report_output = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Plan regeneration failed: {e}")
+
+        with hitl2_col3:
+            if st.button("🔁 Re-run Feasibility", use_container_width=True, key="hitl2_reerun_feas_btn"):
+                with st.spinner("🔍 Re-running feasibility..."):
+                    try:
+                        result = call_feasibility_agent(
+                            st.session_state.approved_requirements,
+                            st.session_state.plan_output.model_dump(),
+                        )
+                        st.session_state.feasibility_output = result
+                        st.session_state.approved_plan = None
+                        st.session_state.approved_feasibility = None
+                        st.session_state.estimation_output = None
+                        st.session_state.approved_estimation = None
+                        st.session_state.report_output = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Feasibility re-run failed: {e}")
+
+        if st.session_state.get("approved_feasibility"):
+            st.success("🎉 Plan and Feasibility are **approved**! Ready for the Estimation Agent.")
+
+        st.markdown('</div>', unsafe_allow_html=True)
+    elif st.session_state.plan_output:
+        st.markdown("---")
+        st.info("📌 Run the Feasibility Agent above to enable HITL #2 review.")
+
+    # ── Step 5: Estimation Agent ────────────────────────────
+    if st.session_state.get("approved_feasibility"):
+        render_estimation_section()
+    elif st.session_state.plan_output and st.session_state.feasibility_output:
+        st.markdown("---")
+        st.info("📌 Approve Plan & Feasibility above to enable the Estimation Agent.")
+
+    # ── Step 6: HITL #3 — Approve Estimation ─────────────────
+    if st.session_state.estimation_output:
+        st.markdown("---")
+        st.markdown("### 🧑‍💼 HITL #3: Review Estimation")
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
+        st.markdown("Review the effort estimation before generating the final report.")
+
+        hitl3_col1, hitl3_col2 = st.columns(2)
+
+        with hitl3_col1:
+            if st.button("✅ Approve Estimation", type="primary", use_container_width=True, key="hitl3_approve_est_btn"):
+                st.session_state.approved_estimation = st.session_state.estimation_output.model_dump()
+                st.success("Estimation approved! Ready for Report Agent.")
+                st.rerun()
+
+        with hitl3_col2:
+            if st.button("📊 Regenerate Estimation", use_container_width=True, key="hitl3_regen_est_btn"):
+                with st.spinner("📊 Regenerating estimation..."):
+                    try:
+                        _pid = (st.session_state.selected_project or {}).get("id")
+                        result = call_estimation_agent(
+                            st.session_state.approved_requirements,
+                            st.session_state.plan_output.model_dump(),
+                            st.session_state.feasibility_output.model_dump(),
+                            project_id=_pid,
+                        )
+                        st.session_state.estimation_output = result
+                        st.session_state.approved_estimation = None
+                        st.session_state.report_output = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Estimation regeneration failed: {e}")
+
+        if st.session_state.approved_estimation:
+            st.success("🎉 Estimation is **approved**! Ready for the Report Agent.")
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Step 7: Report Agent ──────────────────────────────────
     if st.session_state.approved_estimation:

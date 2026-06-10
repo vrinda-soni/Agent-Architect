@@ -52,7 +52,7 @@ def retrieve_context(project_id: str, query_text: str, top_k: int = 5) -> list[d
         return resp.data or []
     except Exception as e:
         print(f"[RAG] retrieval error: {e}")
-        return []
+        return []   
 
 
 def format_context_for_prompt(chunks: list[dict]) -> str:

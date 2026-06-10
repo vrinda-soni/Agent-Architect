@@ -7,8 +7,13 @@ if str(root_dir) not in sys.path:
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+
+app = FastAPI(title="Agent Architect API", version="1.0.0")
+
+# ... existing code ...
 
 app = FastAPI(title="Agent Architect API", version="1.0.0")
 
@@ -64,6 +69,12 @@ def _build_rag_context(project_id: Optional[str], requirements: dict) -> str:
     return format_context_for_prompt(chunks)
 
 
+def _is_quota_error(error_msg: str) -> bool:
+    """Check if error message indicates API quota/rate limit."""
+    keywords = ["429", "too many requests", "quota", "rate limit", "limit exceeded", "resource exhausted"]
+    return any(kw in error_msg.lower() for kw in keywords)
+
+
 # ── Agent endpoints ───────────────────────────────────────────────
 
 @app.post("/api/task-agent")
@@ -72,8 +83,12 @@ def task_agent(req: TaskAgentRequest):
     try:
         result = run_task_agent(req.transcript)
         return result.model_dump()
+    except ValueError as ve:
+        if _is_quota_error(str(ve)):
+            raise HTTPException(status_code=503, detail=f"API quota exhausted. Please wait a few minutes and try again. Details: {str(ve)[:500]}")
+        raise HTTPException(status_code=422, detail=str(ve)[:2000])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)[:1000]}")
 
 
 @app.post("/api/planning-agent")
@@ -83,8 +98,12 @@ def planning_agent(req: PlanningAgentRequest):
         rag_context = _build_rag_context(req.project_id, req.requirements)
         result = run_planning_agent(req.requirements, rag_context=rag_context)
         return result.model_dump()
+    except ValueError as ve:
+        if _is_quota_error(str(ve)):
+            raise HTTPException(status_code=503, detail=f"API quota exhausted. Please wait a few minutes and try again. Details: {str(ve)[:500]}")
+        raise HTTPException(status_code=422, detail=str(ve)[:2000])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)[:1000]}")
 
 
 @app.post("/api/feasibility-agent")
@@ -93,8 +112,12 @@ def feasibility_agent(req: FeasibilityAgentRequest):
     try:
         result = run_feasibility_agent(req.requirements, req.plan)
         return result.model_dump()
+    except ValueError as ve:
+        if _is_quota_error(str(ve)):
+            raise HTTPException(status_code=503, detail=f"API quota exhausted. Please wait a few minutes and try again. Details: {str(ve)[:500]}")
+        raise HTTPException(status_code=422, detail=str(ve)[:2000])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)[:1000]}")
 
 
 @app.post("/api/estimation-agent")
@@ -106,8 +129,12 @@ def estimation_agent(req: EstimationAgentRequest):
             req.requirements, req.plan, req.feasibility, rag_context=rag_context
         )
         return result.model_dump()
+    except ValueError as ve:
+        if _is_quota_error(str(ve)):
+            raise HTTPException(status_code=503, detail=f"API quota exhausted. Please wait a few minutes and try again. Details: {str(ve)[:500]}")
+        raise HTTPException(status_code=422, detail=str(ve)[:2000])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)[:1000]}")
 
 
 @app.post("/api/report-agent")
@@ -116,8 +143,12 @@ def report_agent(req: ReportAgentRequest):
     try:
         result = run_report_agent(req.requirements, req.plan, req.feasibility, req.estimation)
         return result.model_dump()
+    except ValueError as ve:
+        if _is_quota_error(str(ve)):
+            raise HTTPException(status_code=503, detail=f"API quota exhausted. Please wait a few minutes and try again. Details: {str(ve)[:500]}")
+        raise HTTPException(status_code=422, detail=str(ve)[:2000])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {str(e)[:1000]}")
 
 
 # ── RAG endpoints ─────────────────────────────────────────────────
@@ -148,6 +179,16 @@ def delete_document(project_id: str, req: DeleteDocRequest = Body(default=Delete
 @app.get("/health")
 def health():
     return {"status": "ok"}
+@app.api_route("/api/{path:path}", methods=["GET", "PUT", "PATCH"])
+async def api_method_not_allowed(path: str):
+    return JSONResponse(
+        status_code=405,
+        content={
+            "error": "Method Not Allowed",
+            "hint": f"The endpoint '/api/{path}' only accepts POST requests.",
+            "message": "Please use the Streamlit frontend at http://localhost:8501 to interact with the app.",
+        },
+    )
 
 
 if __name__ == "__main__":
