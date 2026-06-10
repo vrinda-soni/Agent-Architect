@@ -91,27 +91,21 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Planning Agent Function
 # -----------------------------------------------------------------
-def run_planning_agent(requirements: dict, rag_context: str = "") -> PlanningAgentOutput:
-    """
-    Runs the Planning Agent on the provided requirements.
-
-    Args:
-        requirements (dict): The approved requirements including technology_context.
-        rag_context (str): Optional RAG context from reference documents.
-
-    Returns:
-        PlanningAgentOutput: A structured Pydantic model containing the technical plan.
-
-    Raises:
-        ValueError: If LLM returns an invalid or unparseable response.
-    """
+def run_planning_agent(requirements: dict, rag_context: str = "", feedback: str = "") -> PlanningAgentOutput:
     if not requirements:
         raise ValueError("Requirements cannot be empty.")
 
-    # Build the prompt
+    rag_section = rag_context
+    if feedback and feedback.strip():
+        rag_section = (
+            f"USER FEEDBACK TO ADDRESS:\n---\n{feedback.strip()}\n---\n"
+            "Incorporate the above feedback into your output before proceeding.\n\n"
+            + rag_section
+        )
+
     prompt = PLANNING_AGENT_PROMPT.format(
         requirements=json.dumps(requirements, indent=2),
-        rag_section=rag_context,
+        rag_section=rag_section,
     )
 
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)

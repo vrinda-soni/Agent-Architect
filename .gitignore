@@ -46,3 +46,6 @@ Thumbs.db
 .mcp.json
 
 .claude
+# Runtime logs
+backend_log.txt
+streamlit_log.txt

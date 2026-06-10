@@ -74,38 +74,33 @@ Rules:
 - Do NOT invent information not present in the transcript.
 - Extract ONLY information explicitly stated or clearly implied in the transcript.
 
+{feedback_section}
 Here is the client meeting transcript:
 ---
 {transcript}
 ---
- 
+
 Respond with ONLY the JSON object, nothing else.
 """
- 
+
 
 # -----------------------------------------------------------------
 # Task Agent Function
 # -----------------------------------------------------------------
-def run_task_agent(transcript: str) -> TaskAgentOutput:
-    """
-    Runs the Task Identification Agent on the provided transcript.
-
-    Args:
-        transcript (str): The raw client meeting transcript text.
-
-    Returns:
-        TaskAgentOutput: A structured Pydantic model containing extracted
-                         pain_points, requirements, constraints, business_goals,
-                         and technology_context.
-
-    Raises:
-        ValueError: If Gemini returns an invalid or unparseable response.
-    """
+def run_task_agent(transcript: str, feedback: str = "") -> TaskAgentOutput:
     if not transcript or not transcript.strip():
         raise ValueError("Transcript cannot be empty.")
 
-    # Build the prompt
-    prompt = TASK_AGENT_PROMPT.format(transcript=transcript.strip())
+    feedback_section = (
+        f"USER FEEDBACK TO ADDRESS:\n---\n{feedback.strip()}\n---\n"
+        "Incorporate the above feedback into your output before proceeding.\n"
+        if feedback and feedback.strip() else ""
+    )
+
+    prompt = TASK_AGENT_PROMPT.format(
+        transcript=transcript.strip(),
+        feedback_section=feedback_section,
+    )
  
     # Call LLM with fallback (Gemini -> OpenRouter)
     raw_text = generate_with_fallback(prompt, use_search=False, agent_name="task_agent")

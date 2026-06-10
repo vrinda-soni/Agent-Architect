@@ -5,10 +5,8 @@ from backend.schemas.estimation_schema import EstimationAgentOutput
 from backend.llm_client import generate_with_fallback
 from backend.agents.json_utils import extract_json
 
-# Load environment variables
 load_dotenv()
 
-# Validate at least one API key is available
 if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():
     raise ValueError("No API key found. Set GEMINI_API_KEY or OPENROUTER_API_KEY in your .env file.")
 
@@ -16,147 +14,193 @@ if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API
 # Prompt Template
 # -----------------------------------------------------------------
 ESTIMATION_AGENT_PROMPT = """
-You are a Senior Technical Architect and Estimation Specialist with deep experience in software project scoping.
+You are a Senior Technical Architect, Project Manager, and Solution Designer with 15+ years of experience delivering software projects across every domain — SaaS, fintech, healthcare, AI/ML, e-commerce, internal tools, and more.
 
-Your task is to analyze the provided project requirements, architecture plan, feasibility analysis, and generate a detailed software development effort estimation.
+You think like a principal engineer who has written hundreds of estimates that survived client scrutiny. You know where complexity hides, what teams actually need, and how to write a WBS that a developer can pick up and start working from.
 
-INPUTS:
+INPUTS YOU HAVE:
+1. Requirements (Task Agent) — pain points, business goals, constraints, user stories, tech preferences
+2. Plan (Planning Agent) — architecture type, technology stack, component breakdown
+3. Feasibility Analysis (Feasibility Agent) — complexity rating, technical risks, timeline viability
 
-1. Task Agent Output — Pain points, requirements, constraints, business goals, technology_context
-2. Planning Agent Output — Architecture type, technology stack, architecture summary
-3. Feasibility Agent Output — Feasibility summary, complexity level, technical risks
+════════════════════════════════════════════
+STEP 1 — UNDERSTAND THE PROJECT
+════════════════════════════════════════════
+Read all inputs carefully. Identify:
+- Project type, domain, and scale
+- Explicit timeline constraints (MVP deadline, sprint targets, go-live date)
+- Budget or team-size signals
+- Core functional areas and modules needed
+- Technical risk drivers from the feasibility analysis
 
-OBJECTIVE:
+════════════════════════════════════════════
+STEP 2 — DECIDE DELIVERY PHASES
+════════════════════════════════════════════
+Phase 1 (MVP): The smallest working product a user can actually USE on Day 1.
+  - Prioritise core happy-path features only
+  - If a specific MVP timeline is mentioned (e.g., "1 week", "2 sprints"), scope Phase 1 to fit
+  - Do NOT add nice-to-haves in Phase 1
 
-Break the project into logical modules and features. For each feature, estimate development effort in hours using DYNAMIC technology categories derived from the actual tech stack proposed by the Planning Agent.
+Phase 2 (Full Build): Everything else — secondary features, polish, advanced capabilities, full QA
 
-CRITICAL: DYNAMIC TECHNOLOGY COLUMNS
+════════════════════════════════════════════
+STEP 3 — BUILD THE WBS
+════════════════════════════════════════════
+Always include these standard modules (adapt or add project-specific ones):
+- PM / Discovery — requirements lock, kickoff, sprint planning (Phase 1)
+- Infrastructure / DevOps — environments, cloud setup, CI/CD (Phase 1)
+- Authentication & Access Control — if the product has users (Phase 1)
+- [Core domain modules — determined by project type]
+- QA / Testing — unit, integration, UAT, performance (Phase 2, some Phase 1)
 
-You MUST define technology categories based on the ACTUAL tech stack from the Planning Agent output. Do NOT use a fixed set of columns.
+For each task, fill in ALL fields:
 
-For example:
-- If the plan uses React + Node.js + MongoDB + AWS → categories might be: ["Frontend (React)", "Backend (Node.js)", "Database (MongoDB)", "Cloud (AWS)", "DevOps"]
-- If the plan uses Vue + Python/Django + PostgreSQL + Azure + Redis → categories might be: ["Frontend (Vue)", "Backend (Django)", "Database (PostgreSQL)", "Cache (Redis)", "Cloud (Azure)", "DevOps"]
-- If the plan uses Angular + .NET + SQL Server + GCP → categories might be: ["Frontend (Angular)", "Backend (.NET)", "Database (SQL Server)", "Cloud (GCP)", "DevOps"]
+ID: Sequential integer starting at 1.
 
-The tech_categories list defines the column order. Each estimation item's tech_hours dict maps to these categories.
+PHASE: "Phase 1 (MVP)" or "Phase 2 (Full Build)"
 
-ESTIMATION GUIDELINES:
+MODULE: The logical workstream this task belongs to (e.g., "Auth", "AI Parser", "Notifications").
 
-- Hours must be realistic for an MVP implementation.
-- Assign hours ONLY to technologies actually used for each feature.
-- If a feature doesn't need a particular technology, omit it from tech_hours or set to 0.
-- Include a "Project Setup" row for environment setup, CI/CD, repository configuration.
-- Include ALL major modules — do not skip important features.
-- tech_remarks: Write technical assumptions and implementation notes.
-- ba_remarks: Leave empty (will be filled during BA review).
-- Do NOT provide cost estimates, budget calculations, or team-size recommendations.
+FEATURE (task name): One clear sentence describing exactly what gets built.
 
-COMPLEXITY RULES:
-- Low: Simple CRUD, basic forms, static pages
-- Medium: Authentication, dashboards, API integrations, business logic
-- High: Real-time systems, complex backend orchestration, advanced analytics
-- Very High: AI/ML systems, multi-agent workflows, streaming, large-scale distributed systems
+ROLE — Who primarily builds this:
+  - "Frontend Dev" — UI, components, state management, UX
+  - "Backend Dev" — APIs, business logic, integrations, data models
+  - "ML/AI Engineer" — model inference, LLM prompting, data pipelines, AI features
+  - "DevOps / Infra" — cloud provisioning, CI/CD, deployments, monitoring
+  - "Full Stack Dev" — spans multiple layers
+  - "PM / BA" — discovery sessions, requirements, sprint planning
+  - "QA Engineer" — testing, automation, UAT
 
-OUTPUT FORMAT:
+EFFORT_HOURS — Human work hours. Use these benchmarks:
+  - Requirements / planning session: 4–8 hrs
+  - Simple CRUD API (one resource): 8–14 hrs
+  - Auth system (JWT + roles): 16–24 hrs
+  - Complex form with validations + API: 8–14 hrs
+  - Dashboard with charts: 12–20 hrs
+  - Third-party API or webhook integration: 12–20 hrs
+  - File upload + cloud storage integration: 10–16 hrs
+  - AI/LLM inference pipeline (prompt + parse + store): 16–28 hrs
+  - AI matching / scoring algorithm: 20–32 hrs
+  - Real-time feature (WebSocket): 16–28 hrs
+  - Search + filters API: 8–14 hrs
+  - Email notification setup: 6–10 hrs
+  - PDF/DOCX export: 8–12 hrs
+  - CI/CD pipeline setup: 6–10 hrs
+  - Cloud environment provisioning: 8–16 hrs
+  - Unit + integration tests (per module): 8–16 hrs
+  - E2E test suite: 10–16 hrs
+  - UAT + bug fixes: 12–20 hrs
 
-Return your response as a valid JSON object with this EXACT structure:
+DURATION_DAYS — Calendar days (wall-clock time). A task with 16 hrs effort ≈ 2 days for one developer. Adjust if task can be parallelized or has blocking waits.
+
+DEPENDENCIES — Comma-separated IDs of tasks that must finish before this one starts. Use "—" if none. Do NOT chain full dependency trees — only the immediate blockers.
+
+COMPLEXITY:
+  - Low: Simple CRUD, basic forms, static pages, copy-paste setup
+  - Medium: Auth, dashboards, API integrations, multi-step business logic
+  - High: Real-time, complex orchestration, advanced analytics, multi-step workflows
+  - Very High: AI/ML systems, multi-agent pipelines, streaming, distributed at scale
+
+CONFIDENCE:
+  - High: Well-understood work, clear requirements, standard implementation
+  - Medium: Some unknowns, third-party system involved, or requirements need clarification
+  - Low: Significant unknowns, novel tech for the team, or scope is unclear
+
+RISK_NOTES — Write a note ONLY when at least one of these is true:
+  - The task is on the critical path (a delay here = overall project delay)
+  - A specific feasibility risk from the Feasibility Agent applies to this task
+  - There is a hidden assumption that could blow up scope if wrong
+  - An ordering constraint exists that the dependencies field doesn't fully capture
+  - Leave as "" for ordinary, well-understood tasks
+
+TECH_REMARKS — Technical assumptions, implementation notes, library choices, or edge cases a developer needs to know. Write this even for simple tasks if something non-obvious applies.
+
+════════════════════════════════════════════
+STEP 4 — CALCULATE TOTALS
+════════════════════════════════════════════
+total_hours = sum of effort_hours across ALL tasks
+phase1_hours = sum of effort_hours for Phase 1 (MVP) tasks only
+phase2_hours = sum of effort_hours for Phase 2 (Full Build) tasks only
+
+════════════════════════════════════════════
+OUTPUT FORMAT — Return ONLY valid JSON, nothing else
+════════════════════════════════════════════
+
 {{
-    "tech_categories": ["Frontend", "Backend", "Database", "Cloud", "AI/ML", "DevOps"],
-    "estimations": [
-        {{
-            "functionality_type": "...",
-            "module": "...",
-            "feature": "...",
-            "complexity": "...",
-            "interface_type": "...",
-            "tech_hours": {{
-                "Frontend": 0,
-                "Backend": 0,
-                "Database": 0,
-                "Cloud": 0,
-                "AI/ML": 0,
-                "DevOps": 0
-            }},
-            "tech_remarks": "...",
-            "ba_remarks": ""
-        }}
-    ],
-    "totals": {{
-        "tech_totals": {{
-            "Frontend": 0,
-            "Backend": 0,
-            "Database": 0,
-            "Cloud": 0,
-            "AI/ML": 0,
-            "DevOps": 0
-        }},
-        "grand_total_hours": 0
+  "estimations": [
+    {{
+      "id": 1,
+      "phase": "Phase 1 (MVP)",
+      "module": "PM / Discovery",
+      "feature": "Requirements lock, user stories, sprint planning session",
+      "role": "PM / BA",
+      "effort_hours": 8,
+      "duration_days": 1.0,
+      "dependencies": "—",
+      "complexity": "Low",
+      "confidence": "High",
+      "risk_notes": "",
+      "tech_remarks": "Scope must be signed off before dev starts — unconstrained scope is the #1 estimation risk",
+      "ba_remarks": ""
     }}
+  ],
+  "totals": {{
+    "total_hours": 0,
+    "phase1_hours": 0,
+    "phase2_hours": 0
+  }}
 }}
 
-IMPORTANT:
-- tech_categories MUST match the keys used in tech_hours and tech_totals.
-- grand_total_hours = sum of ALL values in tech_totals.
-- Ensure totals are calculated correctly (sum of each column across all rows).
-- Return ONLY valid JSON. No markdown. No explanations outside the JSON.
+RULES:
+- id starts at 1, increments by 1 for every task
+- total_hours = phase1_hours + phase2_hours = sum of all effort_hours
+- Minimum 15 tasks — cover ALL major modules thoroughly
+- Return ONLY valid JSON. No markdown fences, no commentary outside the JSON object.
 
 {rag_section}
 
-Here are the requirements (including technology context):
+REQUIREMENTS:
 ---
 {requirements}
 ---
 
-Here is the proposed plan:
+PLAN:
 ---
 {plan}
 ---
 
-Here is the feasibility analysis:
+FEASIBILITY:
 ---
 {feasibility}
 ---
 
-Respond with ONLY the JSON object, nothing else.
+Respond with ONLY the JSON object.
 """
 
 
 # -----------------------------------------------------------------
 # Estimation Agent Function
 # -----------------------------------------------------------------
-def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict, rag_context: str = "") -> EstimationAgentOutput:
-    """
-    Runs the Estimation Agent on the provided requirements, plan, and feasibility.
-
-    Args:
-        requirements (dict): The approved requirements including technology_context.
-        plan (dict): The generated architecture plan.
-        feasibility (dict): The feasibility analysis.
-        rag_context (str): Optional RAG context.
-
-    Returns:
-        EstimationAgentOutput: Structured effort estimations with dynamic tech columns.
-
-    Raises:
-        ValueError: If LLM returns an invalid or unparseable response.
-    """
+def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict, rag_context: str = "", feedback: str = "") -> EstimationAgentOutput:
     if not requirements or not plan or not feasibility:
         raise ValueError("Requirements, Plan, and Feasibility cannot be empty.")
 
-    # Build the prompt
+    rag_section = rag_context
+    if feedback and feedback.strip():
+        rag_section = (
+            f"USER FEEDBACK TO ADDRESS:\n---\n{feedback.strip()}\n---\n"
+            "Incorporate the above feedback into your output before proceeding.\n\n"
+            + rag_section
+        )
+
     prompt = ESTIMATION_AGENT_PROMPT.format(
         requirements=json.dumps(requirements, indent=2),
         plan=json.dumps(plan, indent=2),
         feasibility=json.dumps(feasibility, indent=2),
-        rag_section=rag_context,
+        rag_section=rag_section,
     )
 
-    # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
     raw_text = generate_with_fallback(prompt, use_search=True, agent_name="estimation_agent")
-
-    # Parse the JSON response with robust extraction
     parsed = extract_json(raw_text)
-
-    # Validate against Pydantic schema
     return EstimationAgentOutput(**parsed)

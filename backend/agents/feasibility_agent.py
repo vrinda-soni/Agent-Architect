@@ -68,6 +68,7 @@ Rules:
 - Do NOT include markdown blocks outside the JSON.
 - Respond with ONLY the JSON object, nothing else.
 
+{feedback_section}
 Here are the requirements (including technology context):
 ---
 {requirements}
@@ -84,27 +85,20 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Feasibility Agent Function
 # -----------------------------------------------------------------
-def run_feasibility_agent(requirements: dict, plan: dict) -> FeasibilityAgentOutput:
-    """
-    Runs the Feasibility Agent on the provided requirements and plan.
-
-    Args:
-        requirements (dict): The approved requirements including technology_context.
-        plan (dict): The generated architecture plan.
-
-    Returns:
-        FeasibilityAgentOutput: A structured Pydantic model evaluating feasibility.
-
-    Raises:
-        ValueError: If LLM returns an invalid or unparseable response.
-    """
+def run_feasibility_agent(requirements: dict, plan: dict, feedback: str = "") -> FeasibilityAgentOutput:
     if not requirements or not plan:
         raise ValueError("Requirements and Plan cannot be empty.")
 
-    # Build the prompt
+    feedback_section = (
+        f"USER FEEDBACK TO ADDRESS:\n---\n{feedback.strip()}\n---\n"
+        "Incorporate the above feedback into your output before proceeding.\n"
+        if feedback and feedback.strip() else ""
+    )
+
     prompt = FEASIBILITY_AGENT_PROMPT.format(
         requirements=json.dumps(requirements, indent=2),
-        plan=json.dumps(plan, indent=2)
+        plan=json.dumps(plan, indent=2),
+        feedback_section=feedback_section,
     )
 
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)

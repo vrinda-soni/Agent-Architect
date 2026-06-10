@@ -510,69 +510,35 @@ def render_task_agent_section(transcript: str, project_id: str):
         st.markdown("---")
         st.markdown("#### 🧑‍💼 Human-in-the-Loop Review")
         st.markdown("Review the extracted requirements above and choose an action:")
- 
-        hitl_col1, hitl_col2, hitl_col3 = st.columns(3)
- 
+
+        hitl1_feedback = st.text_area(
+            "💬 What would you like to change? (optional — leave blank to regenerate as-is)",
+            placeholder="e.g. 'The budget constraint of $50k was missed', 'Add mobile app requirement', 'Constraints section needs more detail'",
+            height=80,
+            key="hitl1_feedback",
+        )
+
+        hitl_col1, hitl_col2 = st.columns(2)
+
         with hitl_col1:
             if st.button("✅ Approve & Continue", type="primary", use_container_width=True, key="approve_btn"):
                 st.session_state.approved_requirements = output.model_dump()
                 reset_planning_pipeline()
                 st.success("Requirements approved! Ready for the Planning Agent.")
                 st.rerun()
- 
+
         with hitl_col2:
             if st.button("🔄 Regenerate", use_container_width=True, key="regen_btn"):
                 with st.spinner("🤖 Regenerating..."):
                     try:
-                        result = call_task_agent(transcript)
+                        result = call_task_agent(transcript, feedback=hitl1_feedback)
                         st.session_state.task_output = result
                         st.session_state.approved_requirements = None
                         reset_planning_pipeline()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Regeneration failed: {e}")
- 
-        with hitl_col3:
-            if st.button("✏️ Edit Manually", use_container_width=True, key="edit_btn"):
-                st.session_state["hitl_edit_mode"] = True
- 
-        # Manual Edit Mode
-        if st.session_state.get("hitl_edit_mode"):
-            st.markdown("##### ✏️ Edit Requirements")
-            edited_pain = st.text_area("Pain Points (one per line)", value="\n".join(output.pain_points), height=100, key="edit_pain")
-            edited_reqs = st.text_area("Requirements (one per line)", value="\n".join(output.requirements), height=120, key="edit_reqs")
-            edited_cons = st.text_area("Constraints (one per line)", value="\n".join(output.constraints), height=80, key="edit_cons")
-            edited_goals = st.text_area("Business Goals (one per line)", value="\n".join(output.business_goals), height=100, key="edit_goals")
-                    
-            # Technology context editing
-            tech_ctx = getattr(output, 'technology_context', {}) or {}
-            tech_lines = [f"{k}: {v}" for k, v in tech_ctx.items()]
-            edited_tech = st.text_area("Technology Context (key: value, one per line)", value="\n".join(tech_lines), height=100, key="edit_tech")
-        
-            if st.button("💾 Save Edits & Approve", type="primary", key="save_edits_btn"):
-                from backend.schemas.task_schema import TaskAgentOutput
-                # Parse technology context
-                tech_dict = {}
-                for line in edited_tech.split("\n"):
-                    line = line.strip()
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        tech_dict[k.strip()] = v.strip()
-                        
-                edited_output = TaskAgentOutput(
-                    pain_points=[x.strip() for x in edited_pain.split("\n") if x.strip()],
-                    requirements=[x.strip() for x in edited_reqs.split("\n") if x.strip()],
-                    constraints=[x.strip() for x in edited_cons.split("\n") if x.strip()],
-                    business_goals=[x.strip() for x in edited_goals.split("\n") if x.strip()],
-                    technology_context=tech_dict,
-                )
-                st.session_state.task_output = edited_output
-                st.session_state.approved_requirements = edited_output.model_dump()
-                st.session_state["hitl_edit_mode"] = False
-                reset_planning_pipeline()
-                st.success("✅ Edits saved and requirements approved!")
-                st.rerun()
- 
+
         # Show approved confirmation
         if st.session_state.approved_requirements:
             st.success("🎉 Requirements are **approved** and ready for the Planning Agent in the next phase!")
@@ -781,69 +747,69 @@ def render_estimation_section():
 
         st.markdown("#### 📋 Development Effort Estimation")
 
-        # Get dynamic tech categories
-        tech_categories = estimation.tech_categories or []
-
         # Build DataFrame for display and export
         rows = []
         for idx, item in enumerate(estimation.estimations, start=1):
-            row = {
-                "No": f"A.{idx-1}",
-                "Functionality Type": item.functionality_type,
+            rows.append({
+                "ID": item.id if item.id else idx,
                 "Module": item.module,
-                "Features": item.feature,
+                "Task": item.feature,
+                "Phase": item.phase,
+                "Role": item.role,
+                "Effort (hrs)": item.effort_hours,
+                "Duration (days)": item.duration_days,
+                "Dependencies": item.dependencies,
                 "Complexity": item.complexity,
-                "Interface Type": item.interface_type,
-            }
-            # Add dynamic tech hours columns
-            for cat in tech_categories:
-                row[cat] = item.tech_hours.get(cat, 0)
-            row["Remarks Tech"] = item.tech_remarks
-            row["Remarks BA"] = item.ba_remarks
-            rows.append(row)
+                "Confidence": item.confidence,
+                "Risk / Notes": item.risk_notes,
+                "Remarks Tech": item.tech_remarks,
+                "Remarks BA": item.ba_remarks,
+            })
 
         # Add totals row
         totals = estimation.totals
-        totals_row = {
-            "No": "",
-            "Functionality Type": "",
+        rows.append({
+            "ID": "",
             "Module": "",
-            "Features": "**TOTALS**",
+            "Task": "TOTALS",
+            "Phase": "",
+            "Role": "",
+            "Effort (hrs)": totals.total_hours,
+            "Duration (days)": "",
+            "Dependencies": "",
             "Complexity": "",
-            "Interface Type": "",
-        }
-        for cat in tech_categories:
-            totals_row[cat] = totals.tech_totals.get(cat, 0)
-        totals_row["Remarks Tech"] = ""
-        totals_row["Remarks BA"] = ""
-        rows.append(totals_row)
+            "Confidence": f"P1: {totals.phase1_hours} hrs | P2: {totals.phase2_hours} hrs",
+            "Risk / Notes": "",
+            "Remarks Tech": "",
+            "Remarks BA": "",
+        })
 
         df = pd.DataFrame(rows)
 
-        # Build dynamic column config
         column_config = {
-            "No": st.column_config.TextColumn("No", width="small"),
-            "Functionality Type": st.column_config.TextColumn("Functionality Type", width="medium"),
+            "ID": st.column_config.NumberColumn("ID", width="small"),
             "Module": st.column_config.TextColumn("Module", width="medium"),
-            "Features": st.column_config.TextColumn("Features", width="large"),
+            "Task": st.column_config.TextColumn("Task", width="large"),
+            "Phase": st.column_config.TextColumn("Phase", width="medium"),
+            "Role": st.column_config.TextColumn("Role", width="medium"),
+            "Effort (hrs)": st.column_config.NumberColumn("Effort (hrs)", width="small"),
+            "Duration (days)": st.column_config.NumberColumn("Duration (days)", width="small"),
+            "Dependencies": st.column_config.TextColumn("Dependencies", width="small"),
             "Complexity": st.column_config.TextColumn("Complexity", width="small"),
-            "Interface Type": st.column_config.TextColumn("Interface Type", width="medium"),
+            "Confidence": st.column_config.TextColumn("Confidence", width="medium"),
+            "Risk / Notes": st.column_config.TextColumn("Risk / Notes", width="large"),
+            "Remarks Tech": st.column_config.TextColumn("Remarks Tech", width="large"),
+            "Remarks BA": st.column_config.TextColumn("Remarks BA", width="medium"),
         }
-        for cat in tech_categories:
-            column_config[cat] = st.column_config.NumberColumn(cat, width="small")
-        column_config["Remarks Tech"] = st.column_config.TextColumn("Remarks Tech", width="medium")
-        column_config["Remarks BA"] = st.column_config.TextColumn("Remarks BA", width="medium")
 
-        # Display styled table
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config=column_config,
+        st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config)
+
+        st.markdown(
+            f"**Grand Total: {totals.total_hours} hrs** &nbsp;|&nbsp; "
+            f"Phase 1 (MVP): {totals.phase1_hours} hrs &nbsp;|&nbsp; "
+            f"Phase 2 (Full Build): {totals.phase2_hours} hrs",
+            unsafe_allow_html=True,
         )
-
-        # Grand total display
-        st.markdown(f"**Grand Total: {totals.grand_total_hours} hours**")
 
         # Excel download
         buffer = io.BytesIO()
@@ -902,33 +868,44 @@ def render_hitl2_section():
         rows = []
         for idx, item in enumerate(est.estimations, start=1):
             rows.append({
-                "No": f"A.{idx-1}",
-                "Functionality Type": item.functionality_type,
+                "ID": item.id if item.id else idx,
                 "Module": item.module,
-                "Features": item.feature,
+                "Task": item.feature,
+                "Phase": item.phase,
+                "Role": item.role,
+                "Effort (hrs)": item.effort_hours,
+                "Duration (days)": item.duration_days,
+                "Dependencies": item.dependencies,
                 "Complexity": item.complexity,
-                "HTML": item.html_hours,
-                "ReactJS": item.react_hours,
-                "Python": item.python_hours,
-                "AI": item.ai_hours,
+                "Confidence": item.confidence,
+                "Risk / Notes": item.risk_notes,
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         totals = est.totals
         st.markdown(
-            f"**Totals:** HTML={totals.html_hours}  ReactJS={totals.react_hours}  Python={totals.python_hours}  AI={totals.ai_hours}"
+            f"**Grand Total: {totals.total_hours} hrs** &nbsp;|&nbsp; "
+            f"Phase 1 (MVP): {totals.phase1_hours} hrs &nbsp;|&nbsp; "
+            f"Phase 2 (Full Build): {totals.phase2_hours} hrs",
+            unsafe_allow_html=True,
         )
 
-    # Action buttons
+    # Feedback + action buttons
     st.markdown("---")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    hitl2_feedback = st.text_area(
+        "💬 What would you like to change? (optional — describe what to adjust before regenerating)",
+        placeholder="e.g. 'Switch the backend to FastAPI instead of Django', 'The feasibility underestimates the AI pipeline risk', 'Add a mobile app phase to the estimation'",
+        height=80,
+        key="hitl2_feedback",
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         if st.button("✅ Approve Everything", type="primary", use_container_width=True, key="hitl2_approve_btn"):
             st.session_state.approved_plan = st.session_state.plan_output.model_dump()
             st.session_state.approved_feasibility = st.session_state.feasibility_output.model_dump()
             st.session_state.approved_estimation = st.session_state.estimation_output.model_dump()
-            st.session_state.pop("hitl2_edit_mode", None)
             st.success("All outputs approved! Generating report...")
             st.rerun()
 
@@ -937,7 +914,7 @@ def render_hitl2_section():
             with st.spinner("🏗️ Regenerating plan..."):
                 try:
                     _pid = (st.session_state.selected_project or {}).get("id")
-                    result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
+                    result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid, feedback=hitl2_feedback)
                     st.session_state.plan_output = result
                     st.session_state.feasibility_output = None
                     st.session_state.estimation_output = None
@@ -956,6 +933,7 @@ def render_hitl2_section():
                     result = call_feasibility_agent(
                         st.session_state.approved_requirements,
                         st.session_state.plan_output.model_dump(),
+                        feedback=hitl2_feedback,
                     )
                     st.session_state.feasibility_output = result
                     st.session_state.estimation_output = None
@@ -976,6 +954,7 @@ def render_hitl2_section():
                         st.session_state.plan_output.model_dump(),
                         st.session_state.feasibility_output.model_dump(),
                         project_id=_pid,
+                        feedback=hitl2_feedback,
                     )
                     st.session_state.estimation_output = result
                     st.session_state.approved_estimation = None
@@ -984,109 +963,7 @@ def render_hitl2_section():
                 except Exception as e:
                     st.error(f"Estimation regeneration failed: {e}")
 
-    with c5:
-        if st.button("✏️ Edit Manually", use_container_width=True, key="hitl2_edit_btn"):
-            st.session_state["hitl2_edit_mode"] = True
-
-    # Edit Manually Mode
-    if st.session_state.get("hitl2_edit_mode"):
-        st.markdown("---")
-        st.markdown("#### ✏️ Edit Outputs Manually")
-
-        edit_plan, edit_feas, edit_est = st.tabs(["Edit Plan", "Edit Feasibility", "Edit Estimation"])
-
-        with edit_plan:
-            plan_json = st.text_area(
-                "Plan JSON (edit carefully)",
-                value=json.dumps(st.session_state.plan_output.model_dump(), indent=2),
-                height=300,
-                key="hitl2_plan_edit",
-            )
-
-        with edit_feas:
-            feas_json = st.text_area(
-                "Feasibility JSON (edit carefully)",
-                value=json.dumps(st.session_state.feasibility_output.model_dump(), indent=2),
-                height=300,
-                key="hitl2_feas_edit",
-            )
-
-        with edit_est:
-            est = st.session_state.estimation_output
-            est_rows = []
-            for idx, item in enumerate(est.estimations, start=1):
-                est_rows.append({
-                    "No": f"A.{idx-1}",
-                    "Functionality Type": item.functionality_type,
-                    "Module": item.module,
-                    "Features": item.feature,
-                    "Complexity": item.complexity,
-                    "Interface Type": item.interface_type,
-                    "HTML": item.html_hours,
-                    "ReactJS": item.react_hours,
-                    "Python": item.python_hours,
-                    "AI": item.ai_hours,
-                    "Remarks Tech": item.tech_remarks,
-                    "Remarks BA": item.ba_remarks,
-                })
-            est_df = pd.DataFrame(est_rows)
-            edited_est_df = st.data_editor(est_df, num_rows="dynamic", use_container_width=True, key="hitl2_est_edit_df")
-
-        if st.button("💾 Save Edits & Approve", type="primary", key="hitl2_save_edits_btn"):
-            import json
-            try:
-                from backend.schemas.plan_schema import PlanningAgentOutput
-                from backend.schemas.feasibility_schema import FeasibilityAgentOutput
-                from backend.schemas.estimation_schema import EstimationAgentOutput, EstimationItem, EstimationTotals
-
-                new_plan = PlanningAgentOutput(**json.loads(plan_json))
-                new_feas = FeasibilityAgentOutput(**json.loads(feas_json))
-
-                # Rebuild estimation from edited dataframe
-                new_estimations = []
-                for _, row in edited_est_df.iterrows():
-                    new_estimations.append(EstimationItem(
-                        functionality_type=str(row.get("Functionality Type", "")),
-                        module=str(row.get("Module", "")),
-                        feature=str(row.get("Features", "")),
-                        complexity=str(row.get("Complexity", "")),
-                        interface_type=str(row.get("Interface Type", "")),
-                        html_hours=int(row.get("HTML", 0) or 0),
-                        react_hours=int(row.get("ReactJS", 0) or 0),
-                        python_hours=int(row.get("Python", 0) or 0),
-                        ai_hours=int(row.get("AI", 0) or 0),
-                        tech_remarks=str(row.get("Remarks Tech", "")),
-                        ba_remarks=str(row.get("Remarks BA", "")),
-                    ))
-
-                total_html = sum(e.html_hours for e in new_estimations)
-                total_react = sum(e.react_hours for e in new_estimations)
-                total_python = sum(e.python_hours for e in new_estimations)
-                total_ai = sum(e.ai_hours for e in new_estimations)
-
-                new_est = EstimationAgentOutput(
-                    estimations=new_estimations,
-                    totals=EstimationTotals(
-                        html_hours=total_html,
-                        react_hours=total_react,
-                        python_hours=total_python,
-                        ai_hours=total_ai,
-                    ),
-                )
-
-                st.session_state.plan_output = new_plan
-                st.session_state.feasibility_output = new_feas
-                st.session_state.estimation_output = new_est
-                st.session_state.approved_plan = new_plan.model_dump()
-                st.session_state.approved_feasibility = new_feas.model_dump()
-                st.session_state.approved_estimation = new_est.model_dump()
-                st.session_state["hitl2_edit_mode"] = False
-                st.success("✅ Edits saved and all outputs approved!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to save edits: {e}")
-
-    if st.session_state.approved_estimation and not st.session_state.get("hitl2_edit_mode"):
+    if st.session_state.approved_estimation:
         st.success("🎉 All outputs are **approved**! Report generation is the next phase.")
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1246,53 +1123,62 @@ def render_report_section():
         st.markdown("#### 📊 Effort Estimation")
         if est_data:
             estimations = est_data.get("estimations", [])
-            tech_categories = est_data.get("tech_categories", [])
             totals = est_data.get("totals", {})
 
             if estimations:
                 rows = []
                 for idx, item in enumerate(estimations, start=1):
-                    row = {
-                        "No": f"A.{idx-1}",
-                        "Functionality Type": item.get("functionality_type", ""),
+                    rows.append({
+                        "ID": item.get("id", idx),
                         "Module": item.get("module", ""),
-                        "Features": item.get("feature", ""),
+                        "Task": item.get("feature", ""),
+                        "Phase": item.get("phase", ""),
+                        "Role": item.get("role", ""),
+                        "Effort (hrs)": item.get("effort_hours", 0),
+                        "Duration (days)": item.get("duration_days", 0),
+                        "Dependencies": item.get("dependencies", "—"),
                         "Complexity": item.get("complexity", ""),
-                        "Interface Type": item.get("interface_type", ""),
-                    }
-                    for cat in tech_categories:
-                        row[cat] = item.get("tech_hours", {}).get(cat, 0)
-                    row["Remarks Tech"] = item.get("tech_remarks", "")
-                    row["Remarks BA"] = item.get("ba_remarks", "")
-                    rows.append(row)
+                        "Confidence": item.get("confidence", ""),
+                        "Risk / Notes": item.get("risk_notes", ""),
+                        "Remarks Tech": item.get("tech_remarks", ""),
+                        "Remarks BA": item.get("ba_remarks", ""),
+                    })
 
-                totals_row = {
-                    "No": "", "Functionality Type": "", "Module": "",
-                    "Features": "**TOTALS**", "Complexity": "", "Interface Type": "",
-                }
-                for cat in tech_categories:
-                    totals_row[cat] = totals.get("tech_totals", {}).get(cat, 0)
-                totals_row["Remarks Tech"] = ""
-                totals_row["Remarks BA"] = ""
-                rows.append(totals_row)
+                rows.append({
+                    "ID": "", "Module": "", "Task": "TOTALS", "Phase": "", "Role": "",
+                    "Effort (hrs)": totals.get("total_hours", 0),
+                    "Duration (days)": "",
+                    "Dependencies": "",
+                    "Complexity": "",
+                    "Confidence": f"P1: {totals.get('phase1_hours', 0)} hrs | P2: {totals.get('phase2_hours', 0)} hrs",
+                    "Risk / Notes": "", "Remarks Tech": "", "Remarks BA": "",
+                })
 
                 df = pd.DataFrame(rows)
 
                 column_config = {
-                    "No": st.column_config.TextColumn("No", width="small"),
-                    "Functionality Type": st.column_config.TextColumn("Functionality Type", width="medium"),
+                    "ID": st.column_config.NumberColumn("ID", width="small"),
                     "Module": st.column_config.TextColumn("Module", width="medium"),
-                    "Features": st.column_config.TextColumn("Features", width="large"),
+                    "Task": st.column_config.TextColumn("Task", width="large"),
+                    "Phase": st.column_config.TextColumn("Phase", width="medium"),
+                    "Role": st.column_config.TextColumn("Role", width="medium"),
+                    "Effort (hrs)": st.column_config.NumberColumn("Effort (hrs)", width="small"),
+                    "Duration (days)": st.column_config.NumberColumn("Duration (days)", width="small"),
+                    "Dependencies": st.column_config.TextColumn("Dependencies", width="small"),
                     "Complexity": st.column_config.TextColumn("Complexity", width="small"),
-                    "Interface Type": st.column_config.TextColumn("Interface Type", width="medium"),
+                    "Confidence": st.column_config.TextColumn("Confidence", width="medium"),
+                    "Risk / Notes": st.column_config.TextColumn("Risk / Notes", width="large"),
+                    "Remarks Tech": st.column_config.TextColumn("Remarks Tech", width="large"),
+                    "Remarks BA": st.column_config.TextColumn("Remarks BA", width="medium"),
                 }
-                for cat in tech_categories:
-                    column_config[cat] = st.column_config.NumberColumn(cat, width="small")
-                column_config["Remarks Tech"] = st.column_config.TextColumn("Remarks Tech", width="medium")
-                column_config["Remarks BA"] = st.column_config.TextColumn("Remarks BA", width="medium")
 
                 st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config)
-                st.markdown(f"**Grand Total: {totals.get('grand_total_hours', 0)} hours**")
+                st.markdown(
+                    f"**Grand Total: {totals.get('total_hours', 0)} hrs** &nbsp;|&nbsp; "
+                    f"Phase 1 (MVP): {totals.get('phase1_hours', 0)} hrs &nbsp;|&nbsp; "
+                    f"Phase 2 (Full Build): {totals.get('phase2_hours', 0)} hrs",
+                    unsafe_allow_html=True,
+                )
 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -1625,6 +1511,13 @@ def render_dashboard():
         st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
         st.markdown("Review the Planning and Feasibility outputs before proceeding to Estimation.")
 
+        hitl2b_feedback = st.text_area(
+            "💬 What would you like to change? (optional — describe what to adjust before regenerating)",
+            placeholder="e.g. 'Use a microservices architecture instead of monolith', 'The feasibility missed the payment gateway risk'",
+            height=80,
+            key="hitl2b_feedback",
+        )
+
         hitl2_col1, hitl2_col2, hitl2_col3 = st.columns(3)
 
         with hitl2_col1:
@@ -1639,7 +1532,7 @@ def render_dashboard():
                 with st.spinner("🏗️ Regenerating plan..."):
                     try:
                         _pid = (st.session_state.selected_project or {}).get("id")
-                        result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
+                        result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid, feedback=hitl2b_feedback)
                         st.session_state.plan_output = result
                         st.session_state.feasibility_output = None
                         st.session_state.approved_plan = None
@@ -1658,6 +1551,7 @@ def render_dashboard():
                         result = call_feasibility_agent(
                             st.session_state.approved_requirements,
                             st.session_state.plan_output.model_dump(),
+                            feedback=hitl2b_feedback,
                         )
                         st.session_state.feasibility_output = result
                         st.session_state.approved_plan = None
@@ -1692,6 +1586,13 @@ def render_dashboard():
         st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
         st.markdown("Review the effort estimation before generating the final report.")
 
+        hitl3_feedback = st.text_area(
+            "💬 What would you like to change? (optional — describe what to adjust before regenerating)",
+            placeholder="e.g. 'Phase 1 is too heavy, move notifications to Phase 2', 'Add a dedicated DevOps module', 'The QA effort seems underestimated'",
+            height=80,
+            key="hitl3_est_feedback",
+        )
+
         hitl3_col1, hitl3_col2 = st.columns(2)
 
         with hitl3_col1:
@@ -1710,6 +1611,7 @@ def render_dashboard():
                             st.session_state.plan_output.model_dump(),
                             st.session_state.feasibility_output.model_dump(),
                             project_id=_pid,
+                            feedback=hitl3_feedback,
                         )
                         st.session_state.estimation_output = result
                         st.session_state.approved_estimation = None

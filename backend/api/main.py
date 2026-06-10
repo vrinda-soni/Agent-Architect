@@ -29,20 +29,24 @@ app.add_middleware(
 
 class TaskAgentRequest(BaseModel):
     transcript: str
+    feedback: Optional[str] = ""
 
 class PlanningAgentRequest(BaseModel):
     requirements: dict
     project_id: Optional[str] = None
+    feedback: Optional[str] = ""
 
 class FeasibilityAgentRequest(BaseModel):
     requirements: dict
     plan: dict
+    feedback: Optional[str] = ""
 
 class EstimationAgentRequest(BaseModel):
     requirements: dict
     plan: dict
     feasibility: dict
     project_id: Optional[str] = None
+    feedback: Optional[str] = ""
 
 class ReportAgentRequest(BaseModel):
     requirements: dict
@@ -81,7 +85,7 @@ def _is_quota_error(error_msg: str) -> bool:
 def task_agent(req: TaskAgentRequest):
     from backend.agents.task_agent import run_task_agent
     try:
-        result = run_task_agent(req.transcript)
+        result = run_task_agent(req.transcript, feedback=req.feedback or "")
         return result.model_dump()
     except ValueError as ve:
         if _is_quota_error(str(ve)):
@@ -96,7 +100,7 @@ def planning_agent(req: PlanningAgentRequest):
     from backend.agents.planning_agent import run_planning_agent
     try:
         rag_context = _build_rag_context(req.project_id, req.requirements)
-        result = run_planning_agent(req.requirements, rag_context=rag_context)
+        result = run_planning_agent(req.requirements, rag_context=rag_context, feedback=req.feedback or "")
         return result.model_dump()
     except ValueError as ve:
         if _is_quota_error(str(ve)):
@@ -110,7 +114,7 @@ def planning_agent(req: PlanningAgentRequest):
 def feasibility_agent(req: FeasibilityAgentRequest):
     from backend.agents.feasibility_agent import run_feasibility_agent
     try:
-        result = run_feasibility_agent(req.requirements, req.plan)
+        result = run_feasibility_agent(req.requirements, req.plan, feedback=req.feedback or "")
         return result.model_dump()
     except ValueError as ve:
         if _is_quota_error(str(ve)):
@@ -126,7 +130,8 @@ def estimation_agent(req: EstimationAgentRequest):
     try:
         rag_context = _build_rag_context(req.project_id, req.requirements)
         result = run_estimation_agent(
-            req.requirements, req.plan, req.feasibility, rag_context=rag_context
+            req.requirements, req.plan, req.feasibility,
+            rag_context=rag_context, feedback=req.feedback or ""
         )
         return result.model_dump()
     except ValueError as ve:
