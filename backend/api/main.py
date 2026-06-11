@@ -45,6 +45,8 @@ class EstimationAgentRequest(BaseModel):
     requirements: dict
     plan: dict
     feasibility: dict
+    transcript: Optional[str] = ""
+    include_mvp: Optional[bool] = False
     project_id: Optional[str] = None
     feedback: Optional[str] = ""
 
@@ -131,7 +133,10 @@ def estimation_agent(req: EstimationAgentRequest):
         rag_context = _build_rag_context(req.project_id, req.requirements)
         result = run_estimation_agent(
             req.requirements, req.plan, req.feasibility,
-            rag_context=rag_context, feedback=req.feedback or ""
+            transcript=req.transcript or "",
+            include_mvp=req.include_mvp or False,
+            rag_context=rag_context,
+            feedback=req.feedback or "",
         )
         return result.model_dump()
     except ValueError as ve:

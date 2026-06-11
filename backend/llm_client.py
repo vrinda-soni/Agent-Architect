@@ -4,9 +4,11 @@ llm_client.py
 Unified LLM client with Gemini primary and OpenRouter fallback chain.
 If Gemini API quota/rate-limit is exceeded, automatically falls back
 to OpenRouter models in order:
-  1. moonshotai/kimi-k2.6:free
-  2. google/gemma-4-31b-it:free
-  3. google/gemma-4-26b-a4b-it:free
+  1. openai/gpt-oss-120b
+  2. qwen/qwen3-32b
+  3. moonshotai/kimi-k2.6:free
+  4. google/gemma-4-31b-it:free
+  5. google/gemma-4-26b-a4b-it:free
 
 All calls are traced via Langfuse when configured.
 """
@@ -32,6 +34,8 @@ GEMINI_MODEL = "gemini-2.0-flash"
 
 # Ordered list of fallback models
 FALLBACK_MODELS = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3-32b",
     "moonshotai/kimi-k2.6:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",

@@ -10,183 +10,315 @@ load_dotenv()
 if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():
     raise ValueError("No API key found. Set GEMINI_API_KEY or OPENROUTER_API_KEY in your .env file.")
 
+
 # -----------------------------------------------------------------
-# Prompt Template
+# MVP section variants
+# -----------------------------------------------------------------
+_MVP_SECTION_OFF = """
+SCOPE MODE: PRODUCTION (Full System)
+Plan for a complete, production-ready system. Do NOT add a "phase" field to any row.
+"""
+
+_MVP_SECTION_ON = """
+SCOPE MODE: MVP + FULL BUILD
+Split every row into one of two phases:
+  - "MVP"        — smallest working product; core happy-path features only.
+  - "Full Build" — everything else: secondary features, polish, advanced capabilities, full QA.
+Add a "phase" field to each row. Also calculate phase1_hours (MVP total) and phase2_hours (Full Build total) in totals.
+"""
+
+_PHASE_FIELD_ON  = '"phase": "MVP",'
+_PHASE_FIELD_OFF = ""
+
+_PHASE_TOTALS_FIELD_ON  = '"phase1_hours": 0,\n    "phase2_hours": 0,'
+_PHASE_TOTALS_FIELD_OFF = ""
+
+
+# -----------------------------------------------------------------
+# Prompt
 # -----------------------------------------------------------------
 ESTIMATION_AGENT_PROMPT = """
-You are a Senior Technical Architect, Project Manager, and Solution Designer with 15+ years of experience delivering software projects across every domain — SaaS, fintech, healthcare, AI/ML, e-commerce, internal tools, and more.
+You are a Senior Technical Project Manager, Solution Architect, and Tech Lead with 15+ years of experience.
 
-You think like a principal engineer who has written hundreds of estimates that survived client scrutiny. You know where complexity hides, what teams actually need, and how to write a WBS that a developer can pick up and start working from.
+Your job: read every input, understand the project deeply, then produce a precise effort estimation table that a real team can execute from day one — with the right columns for this specific project.
 
-INPUTS YOU HAVE:
-1. Requirements (Task Agent) — pain points, business goals, constraints, user stories, tech preferences
-2. Plan (Planning Agent) — architecture type, technology stack, component breakdown
-3. Feasibility Analysis (Feasibility Agent) — complexity rating, technical risks, timeline viability
+══════════════════════════════════════════════════
+STEP 1 — READ ALL INPUTS
+══════════════════════════════════════════════════
 
-════════════════════════════════════════════
-STEP 1 — UNDERSTAND THE PROJECT
-════════════════════════════════════════════
-Read all inputs carefully. Identify:
-- Project type, domain, and scale
-- Explicit timeline constraints (MVP deadline, sprint targets, go-live date)
-- Budget or team-size signals
-- Core functional areas and modules needed
-- Technical risk drivers from the feasibility analysis
+1. TRANSCRIPT — raw client conversation: problem, tools mentioned, timeline signals, what they don't want
+2. REQUIREMENTS (Task Agent) — pain points, user stories, functional + non-functional requirements, constraints
+3. PLAN (Planning Agent) — architecture, tech stack, components, integrations, data flow
+4. FEASIBILITY (Feasibility Agent) — complexity ratings, technical risks, unknowns
 
-════════════════════════════════════════════
-STEP 2 — DECIDE DELIVERY PHASES
-════════════════════════════════════════════
-Phase 1 (MVP): The smallest working product a user can actually USE on Day 1.
-  - Prioritise core happy-path features only
-  - If a specific MVP timeline is mentioned (e.g., "1 week", "2 sprints"), scope Phase 1 to fit
-  - Do NOT add nice-to-haves in Phase 1
+Do not write a single row until you have read all four.
 
-Phase 2 (Full Build): Everything else — secondary features, polish, advanced capabilities, full QA
+══════════════════════════════════════════════════
+STEP 2 — DECIDE THE COLUMN STRUCTURE
+══════════════════════════════════════════════════
 
-════════════════════════════════════════════
-STEP 3 — BUILD THE WBS
-════════════════════════════════════════════
-Always include these standard modules (adapt or add project-specific ones):
-- PM / Discovery — requirements lock, kickoff, sprint planning (Phase 1)
-- Infrastructure / DevOps — environments, cloud setup, CI/CD (Phase 1)
-- Authentication & Access Control — if the product has users (Phase 1)
-- [Core domain modules — determined by project type]
-- QA / Testing — unit, integration, UAT, performance (Phase 2, some Phase 1)
+This is the most important step. You define ALL columns for this estimation — nothing is fixed except
+the two remarks columns at the end. Everything else is project-specific.
 
-For each task, fill in ALL fields:
+You will output two lists:
+  structural_columns — the non-tech, non-remarks columns (in display order)
+  tech_stack_columns — the technology-based hour columns (in display order)
 
-ID: Sequential integer starting at 1.
+The final table will always be:
+  [structural_columns] → [tech_stack_columns as "(tech) (hrs)"] → Remarks-Tech → Remarks-BA
 
-PHASE: "Phase 1 (MVP)" or "Phase 2 (Full Build)"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A. STRUCTURAL COLUMNS — decide based on project type
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-MODULE: The logical workstream this task belongs to (e.g., "Auth", "AI Parser", "Notifications").
+Always start with "No" (the row ID). Then choose columns that make the most sense for this project.
+Column names should match the vocabulary of the domain and project type.
 
-FEATURE (task name): One clear sentence describing exactly what gets built.
+Examples by project type:
 
-ROLE — Who primarily builds this:
-  - "Frontend Dev" — UI, components, state management, UX
-  - "Backend Dev" — APIs, business logic, integrations, data models
-  - "ML/AI Engineer" — model inference, LLM prompting, data pipelines, AI features
-  - "DevOps / Infra" — cloud provisioning, CI/CD, deployments, monitoring
-  - "Full Stack Dev" — spans multiple layers
-  - "PM / BA" — discovery sessions, requirements, sprint planning
-  - "QA Engineer" — testing, automation, UAT
+  AI/SaaS platform (like a training tool, AI assistant, analytics platform):
+    ["No", "Functionality Type", "Module", "Features", "Complexity (Tech Lead)", "Interface Type"]
 
-EFFORT_HOURS — Human work hours. Use these benchmarks:
-  - Requirements / planning session: 4–8 hrs
-  - Simple CRUD API (one resource): 8–14 hrs
-  - Auth system (JWT + roles): 16–24 hrs
-  - Complex form with validations + API: 8–14 hrs
-  - Dashboard with charts: 12–20 hrs
-  - Third-party API or webhook integration: 12–20 hrs
-  - File upload + cloud storage integration: 10–16 hrs
-  - AI/LLM inference pipeline (prompt + parse + store): 16–28 hrs
-  - AI matching / scoring algorithm: 20–32 hrs
-  - Real-time feature (WebSocket): 16–28 hrs
-  - Search + filters API: 8–14 hrs
-  - Email notification setup: 6–10 hrs
-  - PDF/DOCX export: 8–12 hrs
-  - CI/CD pipeline setup: 6–10 hrs
-  - Cloud environment provisioning: 8–16 hrs
-  - Unit + integration tests (per module): 8–16 hrs
-  - E2E test suite: 10–16 hrs
-  - UAT + bug fixes: 12–20 hrs
+  Mobile app:
+    ["No", "Feature Area", "Screen / Module", "Description", "Complexity", "Platform"]
 
-DURATION_DAYS — Calendar days (wall-clock time). A task with 16 hrs effort ≈ 2 days for one developer. Adjust if task can be parallelized or has blocking waits.
+  E-commerce / marketplace:
+    ["No", "Domain", "Module", "Features", "Complexity", "Layer"]
 
-DEPENDENCIES — Comma-separated IDs of tasks that must finish before this one starts. Use "—" if none. Do NOT chain full dependency trees — only the immediate blockers.
+  Internal enterprise tool / dashboard:
+    ["No", "Work Area", "Module", "Features", "Complexity", "Interface"]
 
-COMPLEXITY:
-  - Low: Simple CRUD, basic forms, static pages, copy-paste setup
-  - Medium: Auth, dashboards, API integrations, multi-step business logic
-  - High: Real-time, complex orchestration, advanced analytics, multi-step workflows
-  - Very High: AI/ML systems, multi-agent pipelines, streaming, distributed at scale
+  Data pipeline / ML platform:
+    ["No", "Pipeline Stage", "Component", "Description", "Complexity", "Service Type"]
 
-CONFIDENCE:
-  - High: Well-understood work, clear requirements, standard implementation
-  - Medium: Some unknowns, third-party system involved, or requirements need clarification
-  - Low: Significant unknowns, novel tech for the team, or scope is unclear
+  API / developer platform:
+    ["No", "API Domain", "Endpoint / Service", "Description", "Complexity", "Interface"]
 
-RISK_NOTES — Write a note ONLY when at least one of these is true:
-  - The task is on the critical path (a delay here = overall project delay)
-  - A specific feasibility risk from the Feasibility Agent applies to this task
-  - There is a hidden assumption that could blow up scope if wrong
-  - An ordering constraint exists that the dependencies field doesn't fully capture
-  - Leave as "" for ordinary, well-understood tasks
+Rules:
+  - "No" is always the first structural column
+  - Always include a column for the top-level grouping (equivalent to "Functionality Type")
+  - Always include a column for the specific module/component
+  - Always include a column for the feature/task description (this will contain sub-tasks too)
+  - Always include "Complexity" (or renamed equivalent)
+  - Include an "Interface Type" / "Layer" / "Platform" column if relevant
+  - Add or remove columns based on what genuinely helps describe THIS project's work
+  - Do NOT add columns that would be empty or meaningless for this project
 
-TECH_REMARKS — Technical assumptions, implementation notes, library choices, or edge cases a developer needs to know. Write this even for simple tasks if something non-obvious applies.
+B. TECH STACK COLUMNS — derived from the Plan Agent output
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-════════════════════════════════════════════
-STEP 4 — CALCULATE TOTALS
-════════════════════════════════════════════
-total_hours = sum of effort_hours across ALL tasks
-phase1_hours = sum of effort_hours for Phase 1 (MVP) tasks only
-phase2_hours = sum of effort_hours for Phase 2 (Full Build) tasks only
+Read the Plan Agent's tech stack. Map to hour columns:
+  - HTML/CSS markup work → "HTML"
+  - React / Next.js → "ReactJS"
+  - Vue.js / Nuxt → "Vue.js"
+  - Angular → "Angular"
+  - Flutter → "Flutter"
+  - React Native → "React Native"
+  - Swift / iOS native → "Swift"
+  - Kotlin / Android native → "Kotlin"
+  - Python (FastAPI/Django/Flask) → "Python"
+  - Node.js (Express/NestJS) → "Node.js"
+  - Java / Spring → "Java"
+  - Go → "Go"
+  - Ruby on Rails → "Ruby"
+  - Any LLM / RAG / ML / AI / Voice / NLP work → "AI"
+  - Pure DevOps/infra (if no other column covers it) → "DevOps"
 
-════════════════════════════════════════════
-OUTPUT FORMAT — Return ONLY valid JSON, nothing else
-════════════════════════════════════════════
+Order: frontend first → backend → AI/DevOps last
+Only include columns that actually have work in this project.
+
+{mvp_section}
+
+══════════════════════════════════════════════════
+STEP 3 — SCOPE CHECK
+══════════════════════════════════════════════════
+
+- Client asked for specific features only? → scope rows to exactly those.
+- Client asked for a complete system? → cover all layers.
+- Always include: Project Setup row, Auth module (if users exist), QA module.
+
+══════════════════════════════════════════════════
+STEP 4 — BUILD ROWS
+══════════════════════════════════════════════════
+
+Use the Functionality Type / Feature Area grouping system:
+  - Each group gets a letter prefix: A, B, C, D...
+  - First row of each group: A.0, B.0, C.0... (the setup/overview row for that group)
+  - Subsequent rows: A.1, A.2... B.1, B.2...
+  - Project Setup is always A.0
+
+For each row, the value under the structural columns must be appropriate for that column.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FEATURE / DESCRIPTION COLUMN (the main text column)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This column must include sub-tasks inline for all Medium+ complexity rows:
+
+Format:
+  "[Short description]. Sub-tasks: (1) [specific deliverable], (2) [specific deliverable], (3) [specific deliverable]"
+
+BAD: "Build voice session initialization"
+GOOD: "Associate launches roleplay session with microphone permissions, briefing, and objectives. Sub-tasks: (1) Browser mic permission request + fallback handling, (2) Pre-session briefing screen showing scenario + difficulty, (3) Session init API — create record, assign persona, return session token"
+
+Every Medium / High / Very High complexity row MUST have at least 2 sub-tasks.
+Low complexity rows: single atomic description is fine.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMPLEXITY VALUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Low          — atomic unit, single concern, standard setup
+  Medium       — multi-step logic, API integration, stateful UI
+  Medium-High  — multiple services interacting, complex data flows
+  High         — real-time, AI orchestration, multi-layer coordination
+  Very High    — multi-agent systems, streaming pipelines, distributed architecture
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TECH HOURS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Assign 0 for technologies not involved in that row. All integers ≥ 0.
+
+Benchmarks:
+  HTML/CSS layout: 4–10 hrs            UI component: 6–16 hrs
+  Form + validation + API: 8–14 hrs    Dashboard + charts: 12–22 hrs
+  Auth screens: 8–14 hrs               CRUD API: 8–14 hrs
+  Auth backend (JWT+roles): 16–24 hrs  Complex service logic: 14–24 hrs
+  Third-party API integration: 12–20   File upload + storage: 12–18 hrs
+  WebSocket real-time: 16–24 hrs       DB schema + migrations: 6–12 hrs
+  LLM inference pipeline: 18–28 hrs    RAG pipeline: 24–36 hrs
+  Voice STT: 14–22 hrs                 TTS/voice synthesis: 10–18 hrs
+  AI scoring engine: 20–32 hrs         Multi-turn conversation: 16–24 hrs
+  CI/CD pipeline: 8–14 hrs             Cloud provisioning: 10–18 hrs
+  Docker/containers: 8–12 hrs          Unit tests/module: 8–14 hrs
+  Integration tests: 10–16 hrs         E2E test suite: 14–22 hrs
+  UAT + bug fixes: 12–20 hrs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMARKS — TECH TEAM (tech_remarks)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write technical notes, assumptions, dependencies, risks. Examples:
+  "Depends on streaming pipeline; cannot start until that is live"
+  "Assumes Whisper via API; self-hosted adds ~20 hrs"
+  "Critical path — all AI features blocked until this ships"
+
+If no special notes: write a brief technical decision summary.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REMARKS — BA TEAM (ba_remarks)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ALWAYS output exactly "". BA fills this manually. Never put anything here.
+
+══════════════════════════════════════════════════
+STEP 5 — VERIFY BEFORE OUTPUT
+══════════════════════════════════════════════════
+
+  ☐ structural_columns and tech_stack_columns match what is actually used in the rows
+  ☐ Every row has ALL structural column keys (using exact same strings as in structural_columns)
+  ☐ Every row's tech_hours uses EXACT same keys as tech_stack_columns
+  ☐ Every Medium/High/Very High row has sub-tasks in the description column
+  ☐ total_hours = exact sum of ALL tech_hours values across ALL rows
+  ☐ tech_breakdown[col] = sum of that column across all rows
+  ☐ ba_remarks = "" in every single row
+
+══════════════════════════════════════════════════
+OUTPUT FORMAT — valid JSON only, nothing else
+══════════════════════════════════════════════════
+
+IMPORTANT: Each row in "estimations" is a FLAT JSON object. The structural column names (from structural_columns) are used directly as keys at the top level of each row object — NOT nested inside a sub-object. tech_hours, tech_remarks, ba_remarks are also top-level keys.
+
+Example (for an AI SaaS platform using React + Python + AI):
 
 {{
+  "structural_columns": ["No", "Functionality Type", "Module", "Features", "Complexity (Tech Lead)", "Interface Type"],
+  "tech_stack_columns": ["HTML", "ReactJS", "Python", "AI"],
   "estimations": [
     {{
-      "id": 1,
-      "phase": "Phase 1 (MVP)",
-      "module": "PM / Discovery",
-      "feature": "Requirements lock, user stories, sprint planning session",
-      "role": "PM / BA",
-      "effort_hours": 8,
-      "duration_days": 1.0,
-      "dependencies": "—",
-      "complexity": "Low",
-      "confidence": "High",
-      "risk_notes": "",
-      "tech_remarks": "Scope must be signed off before dev starts — unconstrained scope is the #1 estimation risk",
-      "ba_remarks": ""
+      "No": "A.0",
+      "Functionality Type": "Project Setup",
+      "Module": "-",
+      "Features": "Full-stack + AI + cloud project initialization. Sub-tasks: (1) Monorepo setup with frontend/backend split, (2) Docker + docker-compose for local dev, (3) GitHub Actions CI/CD pipeline, (4) Provision dev/staging/prod on cloud with secrets management",
+      "Complexity (Tech Lead)": "Medium-High",
+      "Interface Type": "Web + Backend + AI + Cloud",
+      "tech_hours": {{"HTML": 12, "ReactJS": 12, "Python": 16, "AI": 0}},
+      "tech_remarks": "Critical path — all other modules depend on this. CI/CD and environment setup must be done first.",
+      "ba_remarks": "",
+      {phase_field}
+    }},
+    {{
+      "No": "B.1",
+      "Functionality Type": "Voice Roleplay Engine",
+      "Module": "Real-Time Speech Capture",
+      "Features": "Browser microphone streaming and Whisper STT integration. Sub-tasks: (1) WebRTC mic access + permission handling + fallback UI, (2) Audio chunk streaming to backend via WebSocket, (3) Whisper STT API call + transcript JSON parsing + turn segmentation",
+      "Complexity (Tech Lead)": "High",
+      "Interface Type": "Web + AI Service",
+      "tech_hours": {{"HTML": 8, "ReactJS": 22, "Python": 12, "AI": 18}},
+      "tech_remarks": "Real-time streaming; WebSocket architecture must be stable before building this. Whisper latency is a risk.",
+      "ba_remarks": "",
+      {phase_field}
     }}
   ],
   "totals": {{
-    "total_hours": 0,
-    "phase1_hours": 0,
-    "phase2_hours": 0
+    "total_hours": 100,
+    {phase_totals_field}
+    "tech_breakdown": {{"HTML": 20, "ReactJS": 34, "Python": 28, "AI": 18}}
   }}
 }}
 
-RULES:
-- id starts at 1, increments by 1 for every task
-- total_hours = phase1_hours + phase2_hours = sum of all effort_hours
-- Minimum 15 tasks — cover ALL major modules thoroughly
-- Return ONLY valid JSON. No markdown fences, no commentary outside the JSON object.
+STRICT RULES:
+- structural_columns list = exact set of keys used in every row (besides tech_hours, tech_remarks, ba_remarks, phase)
+- Every row must have every key listed in structural_columns
+- tech_stack_columns = exact set of keys inside every tech_hours dict
+- total_hours = exact arithmetic sum of all tech_hours values across all rows (verify this)
+- tech_breakdown values must sum to total_hours
+- ba_remarks is ALWAYS "" — do not fill it
+- Return ONLY valid JSON — no markdown fences, no text before or after
 
 {rag_section}
 
-REQUIREMENTS:
+TRANSCRIPT:
+---
+{transcript}
+---
+
+REQUIREMENTS (Task Agent):
 ---
 {requirements}
 ---
 
-PLAN:
+PLAN (Planning Agent):
 ---
 {plan}
 ---
 
-FEASIBILITY:
+FEASIBILITY (Feasibility Agent):
 ---
 {feasibility}
 ---
 
-Respond with ONLY the JSON object.
+Respond with ONLY the JSON object. No preamble. No explanation. No markdown.
 """
 
 
 # -----------------------------------------------------------------
 # Estimation Agent Function
 # -----------------------------------------------------------------
-def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict, rag_context: str = "", feedback: str = "") -> EstimationAgentOutput:
+def run_estimation_agent(
+    requirements: dict,
+    plan: dict,
+    feasibility: dict,
+    transcript: str = "",
+    include_mvp: bool = False,
+    rag_context: str = "",
+    feedback: str = "",
+) -> EstimationAgentOutput:
     if not requirements or not plan or not feasibility:
         raise ValueError("Requirements, Plan, and Feasibility cannot be empty.")
 
-    rag_section = rag_context
+    mvp_section        = _MVP_SECTION_ON if include_mvp else _MVP_SECTION_OFF
+    phase_field        = _PHASE_FIELD_ON if include_mvp else _PHASE_FIELD_OFF
+    phase_totals_field = _PHASE_TOTALS_FIELD_ON if include_mvp else _PHASE_TOTALS_FIELD_OFF
+
+    rag_section = rag_context or ""
     if feedback and feedback.strip():
         rag_section = (
             f"USER FEEDBACK TO ADDRESS:\n---\n{feedback.strip()}\n---\n"
@@ -195,9 +327,13 @@ def run_estimation_agent(requirements: dict, plan: dict, feasibility: dict, rag_
         )
 
     prompt = ESTIMATION_AGENT_PROMPT.format(
+        transcript=transcript or "Not provided.",
         requirements=json.dumps(requirements, indent=2),
         plan=json.dumps(plan, indent=2),
         feasibility=json.dumps(feasibility, indent=2),
+        mvp_section=mvp_section,
+        phase_field=phase_field,
+        phase_totals_field=phase_totals_field,
         rag_section=rag_section,
     )
 

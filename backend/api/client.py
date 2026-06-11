@@ -42,6 +42,8 @@ def call_estimation_agent(
     plan: dict,
     feasibility: dict,
     project_id: Optional[str] = None,
+    transcript: str = "",
+    include_mvp: bool = False,
     feedback: str = "",
 ) -> EstimationAgentOutput:
     data = _post(
@@ -51,6 +53,8 @@ def call_estimation_agent(
             "plan": plan,
             "feasibility": feasibility,
             "project_id": project_id,
+            "transcript": transcript,
+            "include_mvp": include_mvp,
             "feedback": feedback,
         },
     )

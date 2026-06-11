@@ -703,6 +703,74 @@ def render_feasibility_section():
 
 
 # -------------------------------------------------------------
+# Shared helper — build estimation DataFrame from raw list + columns
+# -------------------------------------------------------------
+def _build_estimation_df(
+    estimations: list,
+    structural_cols: list,
+    tech_cols: list,
+    include_mvp: bool = False,
+    totals=None,
+) -> pd.DataFrame:
+    rows = []
+    for item in estimations:
+        # Normalise to dict — handles both Pydantic objects and plain dicts
+        data = item if isinstance(item, dict) else item.model_dump(warnings=False)
+        row = {col: data.get(col, "") for col in structural_cols}
+        tech_hours = data.get("tech_hours") or {}
+        for col in tech_cols:
+            row[f"{col} (hrs)"] = tech_hours.get(col, 0)
+        row["Remarks - Tech Team"] = data.get("tech_remarks", "")
+        row["Remarks - BA Team"] = data.get("ba_remarks", "")
+        if include_mvp and data.get("phase"):
+            row["Phase"] = data.get("phase", "")
+        rows.append(row)
+
+    if totals is not None:
+        t = totals if isinstance(totals, dict) else totals.model_dump(warnings=False)
+        t_total = t.get("total_hours", 0)
+        t_tech  = t.get("tech_breakdown") or {}
+        totals_row = {col: "" for col in structural_cols}
+        # Put "TOTALS" label in the second structural column (first is usually "No")
+        if len(structural_cols) > 1:
+            totals_row[structural_cols[1]] = "TOTALS"
+        for col in tech_cols:
+            totals_row[f"{col} (hrs)"] = t_tech.get(col, 0)
+        totals_row["Remarks - Tech Team"] = f"Grand Total: {t_total} hrs"
+        totals_row["Remarks - BA Team"] = ""
+        if include_mvp:
+            p1, p2 = t.get("phase1_hours"), t.get("phase2_hours")
+            if p1 is not None:
+                totals_row["Phase"] = f"MVP: {p1} hrs | Full Build: {p2} hrs"
+        rows.append(totals_row)
+
+    return pd.DataFrame(rows)
+
+
+def _estimation_col_config(structural_cols: list, tech_cols: list, include_mvp: bool = False) -> dict:
+    cfg = {}
+    for i, col in enumerate(structural_cols):
+        # Heuristic widths: first col (No/ID) small, description cols large, others medium
+        col_lower = col.lower()
+        if i == 0 or col_lower in ("no", "id", "#"):
+            width = "small"
+        elif any(k in col_lower for k in ("feature", "description", "task", "detail")):
+            width = "large"
+        elif any(k in col_lower for k in ("complexity", "layer", "platform", "type", "interface")):
+            width = "small"
+        else:
+            width = "medium"
+        cfg[col] = st.column_config.TextColumn(col, width=width)
+    for col in tech_cols:
+        cfg[f"{col} (hrs)"] = st.column_config.NumberColumn(f"{col} (hrs)", width="small")
+    cfg["Remarks - Tech Team"] = st.column_config.TextColumn("Remarks - Tech Team", width="large")
+    cfg["Remarks - BA Team"]   = st.column_config.TextColumn("Remarks - BA Team", width="medium")
+    if include_mvp:
+        cfg["Phase"] = st.column_config.TextColumn("Phase", width="medium")
+    return cfg
+
+
+# -------------------------------------------------------------
 # Render Estimation Agent Results + HITL
 # -------------------------------------------------------------
 def render_estimation_section():
@@ -715,8 +783,8 @@ def render_estimation_section():
 
     with col_run:
         st.markdown(
-            "**Run the Estimation Agent** to generate detailed development effort estimates "
-            "broken down by module, feature, and technology (HTML, ReactJS, Python, AI)."
+            "**Run the Estimation Agent** to generate a detailed Work Breakdown Structure (WBS) "
+            "with effort estimates broken down by module, feature, task, and engineering role."
         )
 
     with col_status:
@@ -725,8 +793,16 @@ def render_estimation_section():
         else:
             st.markdown("<span class='status-badge status-pending'>PENDING</span>", unsafe_allow_html=True)
 
+    include_mvp = st.toggle(
+        "Include MVP / Full Build phase split",
+        value=st.session_state.get("include_mvp", False),
+        key="include_mvp_toggle",
+        help="When enabled, tasks are split into MVP (minimum viable product) and Full Build phases.",
+    )
+    st.session_state["include_mvp"] = include_mvp
+
     if st.button("▶ Run Estimation Agent", type="primary", key="run_estimation_agent_btn"):
-        with st.spinner("📊 Gemini is calculating effort estimates..."):
+        with st.spinner("📊 Generating Work Breakdown Structure..."):
             try:
                 _pid = (st.session_state.selected_project or {}).get("id")
                 result = call_estimation_agent(
@@ -734,6 +810,8 @@ def render_estimation_section():
                     st.session_state.plan_output.model_dump(),
                     st.session_state.feasibility_output.model_dump(),
                     project_id=_pid,
+                    transcript=st.session_state.get("current_transcript", ""),
+                    include_mvp=include_mvp,
                 )
                 st.session_state.estimation_output = result
                 st.session_state.approved_estimation = None
@@ -744,77 +822,36 @@ def render_estimation_section():
 
     if st.session_state.estimation_output:
         estimation = st.session_state.estimation_output
+        _include_mvp  = st.session_state.get("include_mvp", False)
+        struct_cols   = estimation.structural_columns or []
+        tech_cols     = estimation.tech_stack_columns or []
 
-        st.markdown("#### 📋 Development Effort Estimation")
+        st.markdown("#### 📋 Effort Estimation Table")
 
-        # Build DataFrame for display and export
-        rows = []
-        for idx, item in enumerate(estimation.estimations, start=1):
-            rows.append({
-                "ID": item.id if item.id else idx,
-                "Module": item.module,
-                "Task": item.feature,
-                "Phase": item.phase,
-                "Role": item.role,
-                "Effort (hrs)": item.effort_hours,
-                "Duration (days)": item.duration_days,
-                "Dependencies": item.dependencies,
-                "Complexity": item.complexity,
-                "Confidence": item.confidence,
-                "Risk / Notes": item.risk_notes,
-                "Remarks Tech": item.tech_remarks,
-                "Remarks BA": item.ba_remarks,
-            })
-
-        # Add totals row
-        totals = estimation.totals
-        rows.append({
-            "ID": "",
-            "Module": "",
-            "Task": "TOTALS",
-            "Phase": "",
-            "Role": "",
-            "Effort (hrs)": totals.total_hours,
-            "Duration (days)": "",
-            "Dependencies": "",
-            "Complexity": "",
-            "Confidence": f"P1: {totals.phase1_hours} hrs | P2: {totals.phase2_hours} hrs",
-            "Risk / Notes": "",
-            "Remarks Tech": "",
-            "Remarks BA": "",
-        })
-
-        df = pd.DataFrame(rows)
-
-        column_config = {
-            "ID": st.column_config.NumberColumn("ID", width="small"),
-            "Module": st.column_config.TextColumn("Module", width="medium"),
-            "Task": st.column_config.TextColumn("Task", width="large"),
-            "Phase": st.column_config.TextColumn("Phase", width="medium"),
-            "Role": st.column_config.TextColumn("Role", width="medium"),
-            "Effort (hrs)": st.column_config.NumberColumn("Effort (hrs)", width="small"),
-            "Duration (days)": st.column_config.NumberColumn("Duration (days)", width="small"),
-            "Dependencies": st.column_config.TextColumn("Dependencies", width="small"),
-            "Complexity": st.column_config.TextColumn("Complexity", width="small"),
-            "Confidence": st.column_config.TextColumn("Confidence", width="medium"),
-            "Risk / Notes": st.column_config.TextColumn("Risk / Notes", width="large"),
-            "Remarks Tech": st.column_config.TextColumn("Remarks Tech", width="large"),
-            "Remarks BA": st.column_config.TextColumn("Remarks BA", width="medium"),
-        }
-
-        st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config)
-
-        st.markdown(
-            f"**Grand Total: {totals.total_hours} hrs** &nbsp;|&nbsp; "
-            f"Phase 1 (MVP): {totals.phase1_hours} hrs &nbsp;|&nbsp; "
-            f"Phase 2 (Full Build): {totals.phase2_hours} hrs",
-            unsafe_allow_html=True,
+        df = _build_estimation_df(
+            estimation.estimations, struct_cols, tech_cols,
+            include_mvp=_include_mvp, totals=estimation.totals,
         )
+        st.dataframe(df, use_container_width=True, hide_index=True,
+                     column_config=_estimation_col_config(struct_cols, tech_cols, _include_mvp))
 
-        # Excel download
+        totals = estimation.totals
+        st.markdown(f"**Grand Total: {totals.total_hours} hrs**")
+
+        if totals.tech_breakdown:
+            metric_cols = st.columns(min(len(totals.tech_breakdown), 6))
+            for col, (tech, hrs) in zip(metric_cols, totals.tech_breakdown.items()):
+                col.metric(f"{tech} (hrs)", hrs)
+
+        if _include_mvp and totals.phase1_hours is not None:
+            st.markdown(
+                f"MVP: **{totals.phase1_hours} hrs** &nbsp;|&nbsp; Full Build: **{totals.phase2_hours} hrs**",
+                unsafe_allow_html=True,
+            )
+
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Estimation")
+            df.to_excel(writer, index=False, sheet_name="Effort Estimation")
         buffer.seek(0)
 
         st.download_button(
@@ -865,29 +902,22 @@ def render_hitl2_section():
 
     with tab_est:
         est = st.session_state.estimation_output
-        rows = []
-        for idx, item in enumerate(est.estimations, start=1):
-            rows.append({
-                "ID": item.id if item.id else idx,
-                "Module": item.module,
-                "Task": item.feature,
-                "Phase": item.phase,
-                "Role": item.role,
-                "Effort (hrs)": item.effort_hours,
-                "Duration (days)": item.duration_days,
-                "Dependencies": item.dependencies,
-                "Complexity": item.complexity,
-                "Confidence": item.confidence,
-                "Risk / Notes": item.risk_notes,
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        _inc_mvp    = st.session_state.get("include_mvp", False)
+        _s_cols     = est.structural_columns or []
+        _tech_cols  = est.tech_stack_columns or []
+        df_est = _build_estimation_df(est.estimations, _s_cols, _tech_cols, include_mvp=_inc_mvp, totals=est.totals)
+        st.dataframe(df_est, use_container_width=True, hide_index=True,
+                     column_config=_estimation_col_config(_s_cols, _tech_cols, _inc_mvp))
         totals = est.totals
-        st.markdown(
-            f"**Grand Total: {totals.total_hours} hrs** &nbsp;|&nbsp; "
-            f"Phase 1 (MVP): {totals.phase1_hours} hrs &nbsp;|&nbsp; "
-            f"Phase 2 (Full Build): {totals.phase2_hours} hrs",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"**Grand Total: {totals.total_hours} hrs**")
+        if totals.tech_breakdown:
+            for tech, hrs in totals.tech_breakdown.items():
+                st.markdown(f"- {tech}: **{hrs} hrs**")
+        if _inc_mvp and totals.phase1_hours is not None:
+            st.markdown(
+                f"MVP: **{totals.phase1_hours} hrs** &nbsp;|&nbsp; Full Build: **{totals.phase2_hours} hrs**",
+                unsafe_allow_html=True,
+            )
 
     # Feedback + action buttons
     st.markdown("---")
@@ -954,6 +984,8 @@ def render_hitl2_section():
                         st.session_state.plan_output.model_dump(),
                         st.session_state.feasibility_output.model_dump(),
                         project_id=_pid,
+                        transcript=st.session_state.get("current_transcript", ""),
+                        include_mvp=st.session_state.get("include_mvp", False),
                         feedback=hitl2_feedback,
                     )
                     st.session_state.estimation_output = result
@@ -1122,67 +1154,25 @@ def render_report_section():
         # ── 4. ESTIMATION (same as Estimation Agent output) ──
         st.markdown("#### 📊 Effort Estimation")
         if est_data:
-            estimations = est_data.get("estimations", [])
-            totals = est_data.get("totals", {})
+            estimations  = est_data.get("estimations", [])
+            totals       = est_data.get("totals", {})
+            _s_cols_r    = est_data.get("structural_columns", [])
+            _tech_cols_r = est_data.get("tech_stack_columns", [])
+            _inc_mvp_r   = st.session_state.get("include_mvp", False)
 
             if estimations:
-                rows = []
-                for idx, item in enumerate(estimations, start=1):
-                    rows.append({
-                        "ID": item.get("id", idx),
-                        "Module": item.get("module", ""),
-                        "Task": item.get("feature", ""),
-                        "Phase": item.get("phase", ""),
-                        "Role": item.get("role", ""),
-                        "Effort (hrs)": item.get("effort_hours", 0),
-                        "Duration (days)": item.get("duration_days", 0),
-                        "Dependencies": item.get("dependencies", "—"),
-                        "Complexity": item.get("complexity", ""),
-                        "Confidence": item.get("confidence", ""),
-                        "Risk / Notes": item.get("risk_notes", ""),
-                        "Remarks Tech": item.get("tech_remarks", ""),
-                        "Remarks BA": item.get("ba_remarks", ""),
-                    })
-
-                rows.append({
-                    "ID": "", "Module": "", "Task": "TOTALS", "Phase": "", "Role": "",
-                    "Effort (hrs)": totals.get("total_hours", 0),
-                    "Duration (days)": "",
-                    "Dependencies": "",
-                    "Complexity": "",
-                    "Confidence": f"P1: {totals.get('phase1_hours', 0)} hrs | P2: {totals.get('phase2_hours', 0)} hrs",
-                    "Risk / Notes": "", "Remarks Tech": "", "Remarks BA": "",
-                })
-
-                df = pd.DataFrame(rows)
-
-                column_config = {
-                    "ID": st.column_config.NumberColumn("ID", width="small"),
-                    "Module": st.column_config.TextColumn("Module", width="medium"),
-                    "Task": st.column_config.TextColumn("Task", width="large"),
-                    "Phase": st.column_config.TextColumn("Phase", width="medium"),
-                    "Role": st.column_config.TextColumn("Role", width="medium"),
-                    "Effort (hrs)": st.column_config.NumberColumn("Effort (hrs)", width="small"),
-                    "Duration (days)": st.column_config.NumberColumn("Duration (days)", width="small"),
-                    "Dependencies": st.column_config.TextColumn("Dependencies", width="small"),
-                    "Complexity": st.column_config.TextColumn("Complexity", width="small"),
-                    "Confidence": st.column_config.TextColumn("Confidence", width="medium"),
-                    "Risk / Notes": st.column_config.TextColumn("Risk / Notes", width="large"),
-                    "Remarks Tech": st.column_config.TextColumn("Remarks Tech", width="large"),
-                    "Remarks BA": st.column_config.TextColumn("Remarks BA", width="medium"),
-                }
-
-                st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config)
-                st.markdown(
-                    f"**Grand Total: {totals.get('total_hours', 0)} hrs** &nbsp;|&nbsp; "
-                    f"Phase 1 (MVP): {totals.get('phase1_hours', 0)} hrs &nbsp;|&nbsp; "
-                    f"Phase 2 (Full Build): {totals.get('phase2_hours', 0)} hrs",
-                    unsafe_allow_html=True,
-                )
+                df = _build_estimation_df(estimations, _s_cols_r, _tech_cols_r, include_mvp=_inc_mvp_r, totals=totals)
+                st.dataframe(df, use_container_width=True, hide_index=True,
+                             column_config=_estimation_col_config(_s_cols_r, _tech_cols_r, _inc_mvp_r))
+                st.markdown(f"**Grand Total: {totals.get('total_hours', 0)} hrs**")
+                tech_breakdown = totals.get("tech_breakdown", {})
+                if tech_breakdown:
+                    for tech, hrs in tech_breakdown.items():
+                        st.markdown(f"- {tech}: **{hrs} hrs**")
 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Estimation")
+                    df.to_excel(writer, index=False, sheet_name="Effort Estimation")
                 buffer.seek(0)
                 st.download_button(
                     label="📥 Download Estimation as Excel",
@@ -1416,9 +1406,11 @@ def render_dashboard():
         if transcript_record:
             existing_transcript = transcript_record.get("content", "")
         st.session_state["_transcript_exists"] = bool(existing_transcript.strip())
+        st.session_state["current_transcript"] = existing_transcript
     except Exception as e:
         st.error(f"Error fetching transcript: {e}")
         st.session_state["_transcript_exists"] = False
+        st.session_state["current_transcript"] = ""
  
     with col_left:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -1611,6 +1603,8 @@ def render_dashboard():
                             st.session_state.plan_output.model_dump(),
                             st.session_state.feasibility_output.model_dump(),
                             project_id=_pid,
+                            transcript=st.session_state.get("current_transcript", ""),
+                            include_mvp=st.session_state.get("include_mvp", False),
                             feedback=hitl3_feedback,
                         )
                         st.session_state.estimation_output = result
