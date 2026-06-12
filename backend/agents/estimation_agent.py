@@ -312,7 +312,8 @@ def run_estimation_agent(
     feedback: str = "",
 ) -> EstimationAgentOutput:
     if not requirements or not plan or not feasibility:
-        raise ValueError("Requirements, Plan, and Feasibility cannot be empty.")
+        raise ValueError("R" \
+        "equirements, Plan, and Feasibility cannot be empty.")
 
     mvp_section        = _MVP_SECTION_ON if include_mvp else _MVP_SECTION_OFF
     phase_field        = _PHASE_FIELD_ON if include_mvp else _PHASE_FIELD_OFF

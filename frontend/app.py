@@ -1,10 +1,10 @@
 import sys
 from pathlib import Path
 
-# Add root folder to sys.path if not present to ensure backend imports work
+# Streamlit's exec()-based runner can lose sys.path mutations; insert at front to be safe
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
-    sys.path.append(str(root_dir))
+    sys.path.insert(0, str(root_dir))
 
 import html
 import io
@@ -59,6 +59,52 @@ def level_badge_html(level: str, badge_map: dict) -> str:
     return f'<div class="level-badge">{emoji} {label}</div>'
 
 
+def _step_header(num: str, title: str, desc: str = "", color: str = "indigo") -> str:
+    """Render a styled step-number section header inside a card."""
+    palettes = {
+        "indigo": ("rgba(99,102,241,0.18)", "rgba(99,102,241,0.45)", "#818CF8"),
+        "green":  ("rgba(5,150,105,0.15)",   "rgba(5,150,105,0.45)",  "#34D399"),
+        "amber":  ("rgba(217,119,6,0.15)",    "rgba(217,119,6,0.45)",  "#FCD34D"),
+        "rose":   ("rgba(244,63,94,0.15)",    "rgba(244,63,94,0.45)",  "#FB7185"),
+        "violet": ("rgba(124,58,237,0.18)",   "rgba(124,58,237,0.45)", "#C4B5FD"),
+    }
+    bg, border, fg = palettes.get(color, palettes["indigo"])
+    desc_html = (
+        f'<div style="font-size:0.8rem;color:#475569;margin-top:3px;line-height:1.4">{desc}</div>'
+        if desc else ""
+    )
+    return (
+        f'<div style="display:flex;align-items:flex-start;gap:0.9rem;margin-bottom:1.1rem">'
+        f'<div style="min-width:30px;height:30px;border-radius:7px;background:{bg};'
+        f'border:1px solid {border};color:{fg};display:flex;align-items:center;'
+        f'justify-content:center;font-size:0.82rem;font-weight:700;flex-shrink:0">{num}</div>'
+        f'<div><div style="font-size:1rem;font-weight:600;color:#E2E8F0;line-height:1.3">'
+        f'{title}</div>{desc_html}</div></div>'
+    )
+
+
+def _pipeline_html(steps: list) -> str:
+    """Render a compact pipeline status list for the sidebar."""
+    html_parts = []
+    for label, done in steps:
+        dot = (
+            "background:#34D399;box-shadow:0 0 5px rgba(52,211,153,0.35)"
+            if done else "background:#1E293B;border:1px solid #334155"
+        )
+        txt_color = "#94A3B8" if done else "#3B4A5A"
+        icon = "✓" if done else "·"
+        icon_color = "#34D399" if done else "#3B4A5A"
+        html_parts.append(
+            f'<div style="display:flex;align-items:center;gap:8px;padding:4px 0;'
+            f'font-size:12.5px;color:{txt_color};font-family:Inter,sans-serif">'
+            f'<div style="width:7px;height:7px;border-radius:50%;flex-shrink:0;{dot}"></div>'
+            f'<span>{label}</span>'
+            f'<span style="margin-left:auto;font-size:11px;color:{icon_color};font-weight:700">{icon}</span>'
+            f'</div>'
+        )
+    return "\n".join(html_parts)
+
+
 def _sanitize_mermaid(diagram: str) -> str:
     """Robustly clean LLM-generated mermaid diagrams for mermaid.js v10."""
     import re
@@ -70,28 +116,35 @@ def _sanitize_mermaid(diagram: str) -> str:
             cleaned = cleaned[7:].strip()
     # Replace semicolons with newlines (LLM often uses semicolons as separators)
     cleaned = cleaned.replace(";", "\n")
-    # Normalise escaped newlines (\n literal in JSON strings)
+    # Normalise escaped newlines
     cleaned = cleaned.replace("\\n", "\n")
-    # Remove special characters that break mermaid syntax
-    cleaned = re.sub(r'[^\x20-\x7E\n\t]', '', cleaned)  # Keep only printable ASCII
-    # Remove problematic characters that cause syntax errors
-    cleaned = cleaned.replace('"', "'")  # Replace double quotes with single
-    cleaned = re.sub(r'[{}\[\]]', '', cleaned)  # Remove braces that can cause issues
-    # Fix common LLM mistakes
-    cleaned = re.sub(r'-->', '-->', cleaned)  # Normalize arrows
-    cleaned = re.sub(r'--+>', '-->', cleaned)  # Fix multiple dashes
-    cleaned = re.sub(r'-{3,}', '--', cleaned)  # Limit consecutive dashes
-    # Remove empty lines and collapse multiple blank lines
+    # Remove non-printable / non-ASCII chars but keep brackets — they are required for Node[Label] syntax
+    cleaned = re.sub(r'[^\x20-\x7E\n\t]', '', cleaned)
+    # Fix arrow styles
+    cleaned = re.sub(r'-{3,}>', '-->', cleaned)
+    cleaned = re.sub(r'--+>', '-->', cleaned)
+    # Collapse blank lines
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    # Rename mermaid reserved keywords when used as bare node IDs to avoid parse errors
+    _reserved = {"end": "EndNode", "start": "StartNode", "default": "DefaultNode"}
+    lines = []
+    for line in cleaned.split("\n"):
+        stripped = line.strip().lower()
+        # Skip declaration lines (flowchart TD, graph LR, etc.)
+        if any(stripped.startswith(v) for v in ("flowchart", "graph ", "subgraph", "end", "style", "classDef", "class ")):
+            lines.append(line.rstrip())
+            continue
+        for kw, repl in _reserved.items():
+            # Only rename bare node IDs (word boundary, followed by [ --> or whitespace or EOL)
+            line = re.sub(r'\b' + re.escape(kw) + r'\b(?=\s*[\[>\-\s]|$)', repl, line, flags=re.IGNORECASE)
+        lines.append(line.rstrip())
+    cleaned = "\n".join(lines)
     # Ensure diagram starts with a valid declaration
     first_line = cleaned.split("\n")[0].strip().lower()
     valid_starts = ("flowchart", "graph ", "sequencediagram", "classdiagram",
                     "statediagram", "erdiagram", "gantt", "pie", "mindmap")
-    if not any(first_line.startswith(v.lower()) for v in valid_starts):
+    if not any(first_line.startswith(v) for v in valid_starts):
         cleaned = "flowchart TD\n" + cleaned
-    # Remove any trailing whitespace on each line
-    lines = [line.rstrip() for line in cleaned.split("\n")]
-    cleaned = "\n".join(lines)
     return cleaned.strip()
 
 
@@ -107,8 +160,8 @@ def render_mermaid_diagram(diagram: str, height: int = 540) -> None:
         body {{
             margin: 0;
             padding: 16px;
-            background: #0e1117;
-            font-family: 'Segoe UI', sans-serif;
+            background: #0B0D14;
+            font-family: 'Inter', 'Segoe UI', sans-serif;
         }}
         .mermaid {{
             display: flex;
@@ -128,14 +181,20 @@ def render_mermaid_diagram(diagram: str, height: int = 540) -> None:
             theme: "dark",
             flowchart: {{ curve: "basis", padding: 20, useMaxWidth: true }},
             themeVariables: {{
-                primaryColor: "#6622FF",
-                primaryTextColor: "#ffffff",
-                primaryBorderColor: "#FF3366",
-                lineColor: "#888899",
-                secondaryColor: "#FF9933",
-                tertiaryColor: "#00d4aa",
-                fontFamily: "'Segoe UI', sans-serif",
-                fontSize: "15px"
+                primaryColor: "#312E81",
+                primaryTextColor: "#E2E8F0",
+                primaryBorderColor: "#6366F1",
+                lineColor: "#475569",
+                secondaryColor: "#1E1B4B",
+                tertiaryColor: "#0F172A",
+                background: "#0B0D14",
+                mainBkg: "#1E1B4B",
+                nodeBorder: "#6366F1",
+                clusterBkg: "#0F172A",
+                titleColor: "#E2E8F0",
+                edgeLabelBackground: "#1E293B",
+                fontFamily: "'Inter', 'Segoe UI', sans-serif",
+                fontSize: "14px"
             }}
         }});
     </script>
@@ -157,171 +216,430 @@ st.set_page_config(
  
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
- 
-    * { font-family: 'Outfit', sans-serif; }
- 
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+    * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important; }
+
+    /* ── App background ──────────────────────────────────────────── */
+    .stApp { background: #0B0D14 !important; }
+
+    /* ── Typography ──────────────────────────────────────────────── */
     .main-title {
-        font-size: 3rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #FF3366, #FF9933, #6622FF);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
+        font-size: 1.85rem;
+        font-weight: 700;
+        color: #E2E8F0;
+        letter-spacing: -0.3px;
+        margin-bottom: 0.2rem;
+        line-height: 1.25;
     }
- 
+
     .subtitle {
-        color: #888899;
-        font-size: 1.2rem;
+        color: #475569;
+        font-size: 0.92rem;
         font-weight: 400;
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
     }
- 
+
+    /* ── Cards ───────────────────────────────────────────────────── */
     .glass-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 16px;
-        padding: 2rem;
-        backdrop-filter: blur(10px);
-        margin-bottom: 1.5rem;
+        background: rgba(255, 255, 255, 0.025);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 12px;
+        padding: 1.6rem 1.75rem;
+        margin-bottom: 1.1rem;
     }
- 
+
+    /* ── Accent bars ─────────────────────────────────────────────── */
     .accent-bar {
-        height: 4px;
-        background: linear-gradient(90deg, #FF3366, #FF9933);
+        height: 3px;
+        background: linear-gradient(90deg, #6366F1, #818CF8);
         border-radius: 2px;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1.2rem;
     }
- 
+
     .accent-bar-purple {
-        height: 4px;
-        background: linear-gradient(90deg, #6622FF, #00CCFF);
+        height: 3px;
+        background: linear-gradient(90deg, #7C3AED, #6366F1);
         border-radius: 2px;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1.2rem;
     }
- 
+
     .accent-bar-green {
-        height: 4px;
-        background: linear-gradient(90deg, #00C853, #00E5FF);
+        height: 3px;
+        background: linear-gradient(90deg, #059669, #10B981);
         border-radius: 2px;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1.2rem;
     }
- 
+
+    /* ── Status badges ───────────────────────────────────────────── */
     .status-badge {
-        display: inline-block;
-        padding: 0.35rem 0.75rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.28rem 0.65rem;
+        border-radius: 6px;
+        font-size: 0.7rem;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.08em;
+        white-space: nowrap;
+        line-height: 1;
     }
- 
-    .status-active {
-        background-color: rgba(0, 204, 255, 0.15);
-        color: #00CCFF;
-        border: 1px solid rgba(0, 204, 255, 0.3);
-    }
- 
+
     .status-completed {
-        background-color: rgba(50, 205, 50, 0.15);
-        color: #32CD32;
-        border: 1px solid rgba(50, 205, 50, 0.3);
+        background: rgba(5, 150, 105, 0.12);
+        color: #34D399;
+        border: 1px solid rgba(5, 150, 105, 0.25);
     }
- 
+
     .status-pending {
-        background-color: rgba(255, 165, 0, 0.15);
-        color: #FFA500;
-        border: 1px solid rgba(255, 165, 0, 0.3);
+        background: rgba(100, 116, 139, 0.1);
+        color: #64748B;
+        border: 1px solid rgba(100, 116, 139, 0.2);
     }
- 
+
+    .status-active {
+        background: rgba(99, 102, 241, 0.12);
+        color: #A5B4FC;
+        border: 1px solid rgba(99, 102, 241, 0.25);
+    }
+
+    /* ── List items ──────────────────────────────────────────────── */
     .requirement-item {
-        background: rgba(102, 34, 255, 0.08);
-        border-left: 3px solid #6622FF;
-        padding: 0.6rem 1rem;
+        background: rgba(99, 102, 241, 0.06);
+        border-left: 2px solid #6366F1;
+        padding: 0.5rem 0.9rem;
         border-radius: 0 8px 8px 0;
-        margin-bottom: 0.5rem;
-        font-size: 0.95rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.88rem;
+        color: #CBD5E1;
+        line-height: 1.5;
     }
- 
+
     .pain-item {
-        background: rgba(255, 51, 102, 0.08);
-        border-left: 3px solid #FF3366;
-        padding: 0.6rem 1rem;
+        background: rgba(244, 63, 94, 0.06);
+        border-left: 2px solid #F43F5E;
+        padding: 0.5rem 0.9rem;
         border-radius: 0 8px 8px 0;
-        margin-bottom: 0.5rem;
-        font-size: 0.95rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.88rem;
+        color: #CBD5E1;
+        line-height: 1.5;
     }
- 
+
     .goal-item {
-        background: rgba(0, 200, 83, 0.08);
-        border-left: 3px solid #00C853;
-        padding: 0.6rem 1rem;
+        background: rgba(16, 185, 129, 0.06);
+        border-left: 2px solid #10B981;
+        padding: 0.5rem 0.9rem;
         border-radius: 0 8px 8px 0;
-        margin-bottom: 0.5rem;
-        font-size: 0.95rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.88rem;
+        color: #CBD5E1;
+        line-height: 1.5;
     }
- 
+
     .constraint-item {
-        background: rgba(255, 165, 0, 0.08);
-        border-left: 3px solid #FFA500;
-        padding: 0.6rem 1rem;
+        background: rgba(245, 158, 11, 0.06);
+        border-left: 2px solid #F59E0B;
+        padding: 0.5rem 0.9rem;
         border-radius: 0 8px 8px 0;
+        margin-bottom: 0.4rem;
+        font-size: 0.88rem;
+        color: #CBD5E1;
+        line-height: 1.5;
+    }
+
+    /* ── Metric cards ────────────────────────────────────────────── */
+    .metric-card {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 10px;
+        padding: 0.9rem 1.1rem;
         margin-bottom: 0.5rem;
-        font-size: 0.95rem;
-    }
- 
-    div[data-baseweb="input"] { border-radius: 8px !important; }
- 
-    button[kind="primary"] {
-        background: linear-gradient(135deg, #6622FF, #00CCFF) !important;
-        border: none !important;
-        color: white !important;
-        font-weight: 600 !important;
-        border-radius: 8px !important;
-        padding: 0.5rem 2rem !important;
-        transition: transform 0.2s ease, box-shadow 0.2s ease !important;
-    }
- 
-    button[kind="primary"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 15px rgba(102, 34, 255, 0.4);
     }
 
     .metric-label {
-        font-size: 0.8rem;
-        color: #888899;
+        font-size: 0.68rem;
+        color: #475569;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
-        font-weight: 600;
-        margin-bottom: 0.35rem;
+        letter-spacing: 0.1em;
+        font-weight: 700;
+        margin-bottom: 0.45rem;
     }
 
     .level-badge {
         display: inline-block;
-        padding: 0.45rem 0.9rem;
-        border-radius: 12px;
-        font-size: 1.05rem;
+        padding: 0.35rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.9rem;
         font-weight: 600;
         background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.09);
+        color: #E2E8F0;
     }
 
-    .metric-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        border-radius: 12px;
-        padding: 1rem 1.25rem;
-        margin-bottom: 0.5rem;
+    /* ── Inputs ──────────────────────────────────────────────────── */
+    div[data-baseweb="input"] { border-radius: 8px !important; }
+    div[data-baseweb="input"] input {
+        padding: 0.45rem 0.75rem !important;
+        font-size: 0.875rem !important;
+        height: auto !important;
+    }
+    div[data-baseweb="textarea"] > div { border-radius: 8px !important; }
+    div[data-baseweb="textarea"] textarea {
+        font-size: 0.875rem !important;
+        line-height: 1.5 !important;
+    }
+    /* Tighter label spacing */
+    label[data-testid="stWidgetLabel"] {
+        font-size: 0.8rem !important;
+        font-weight: 500 !important;
+        color: #64748B !important;
+        margin-bottom: 0.2rem !important;
+    }
+
+    /* ── Primary buttons ─────────────────────────────────────────── */
+    button[kind="primary"] {
+        background: #6366F1 !important;
+        border: none !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-radius: 8px !important;
+        font-size: 0.82rem !important;
+        padding: 0.4rem 1rem !important;
+        letter-spacing: 0.01em !important;
+        transition: all 0.18s ease !important;
+        height: auto !important;
+        min-height: 36px !important;
+    }
+
+    button[kind="primary"]:hover {
+        background: #4F46E5 !important;
+        box-shadow: 0 4px 14px rgba(99, 102, 241, 0.38) !important;
+        transform: translateY(-1px) !important;
+    }
+
+    /* Secondary / outline buttons */
+    button[kind="secondary"] {
+        border-radius: 8px !important;
+        font-size: 0.82rem !important;
+        padding: 0.4rem 1rem !important;
+        height: auto !important;
+        min-height: 36px !important;
+        font-weight: 500 !important;
+        border: 1px solid rgba(255,255,255,0.12) !important;
+        background: transparent !important;
+        color: #94A3B8 !important;
+        transition: all 0.15s ease !important;
+    }
+
+    button[kind="secondary"]:hover {
+        border-color: rgba(99,102,241,0.4) !important;
+        color: #A5B4FC !important;
+        background: rgba(99,102,241,0.07) !important;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────────── */
+    [data-testid="stSidebar"] {
+        background: #0D1017 !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.055) !important;
+    }
+
+    [data-testid="stSidebar"] section[data-testid="stSidebarContent"] {
+        padding-top: 1.5rem !important;
+    }
+
+    /* ── Download row ────────────────────────────────────────────── */
+    .download-row {
+        display: grid;
+        gap: 0.75rem;
+    }
+
+    /* ── Section info note ───────────────────────────────────────── */
+    .info-note {
+        background: rgba(99, 102, 241, 0.07);
+        border: 1px solid rgba(99, 102, 241, 0.18);
+        border-radius: 8px;
+        padding: 0.65rem 1rem;
+        font-size: 0.85rem;
+        color: #94A3B8;
+        margin-bottom: 1rem;
+    }
+
+    /* Tighter file uploader */
+    [data-testid="stFileUploader"] { margin-bottom: 0.5rem !important; }
+    [data-testid="stFileUploader"] label { font-size: 0.82rem !important; color: #64748B !important; }
+
+    /* ══════════════════════════════════════════════════════════
+       LIGHT THEME — activated when html[data-theme="light"]
+       ══════════════════════════════════════════════════════════ */
+
+    /* App background */
+    html[data-theme="light"] .stApp,
+    html[data-theme="light"] [data-testid="stAppViewContainer"],
+    html[data-theme="light"] [data-testid="stMain"],
+    html[data-theme="light"] section.main,
+    html[data-theme="light"] .main .block-container {
+        background: #F1F5F9 !important;
+        color: #1E293B !important;
+    }
+
+    /* Sidebar */
+    html[data-theme="light"] [data-testid="stSidebar"] {
+        background: #FFFFFF !important;
+        border-right: 1px solid rgba(0,0,0,0.09) !important;
+    }
+    html[data-theme="light"] [data-testid="stSidebar"] label,
+    html[data-theme="light"] [data-testid="stSidebar"] span,
+    html[data-theme="light"] [data-testid="stSidebar"] p,
+    html[data-theme="light"] [data-testid="stSidebarContent"] div { color: #475569 !important; }
+    html[data-theme="light"] [data-testid="stSidebar"] select,
+    html[data-theme="light"] [data-testid="stSidebar"] input { background: #F8FAFC !important; color: #1E293B !important; }
+
+    /* Typography */
+    html[data-theme="light"] .main-title { color: #0F172A !important; }
+    html[data-theme="light"] .subtitle { color: #64748B !important; }
+
+    /* Markdown text */
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] p,
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] li,
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] strong { color: #334155 !important; }
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] h1,
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] h2,
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] h3,
+    html[data-theme="light"] [data-testid="stMarkdownContainer"] h4 { color: #0F172A !important; }
+
+    /* Accent bars: keep colors, just adjust opacity */
+    html[data-theme="light"] .accent-bar,
+    html[data-theme="light"] .accent-bar-purple,
+    html[data-theme="light"] .accent-bar-green { opacity: 0.7; }
+
+    /* Metric & glass cards */
+    html[data-theme="light"] .metric-card {
+        background: rgba(255,255,255,0.9) !important;
+        border-color: rgba(0,0,0,0.09) !important;
+    }
+    html[data-theme="light"] .metric-label { color: #64748B !important; }
+    html[data-theme="light"] .level-badge {
+        background: rgba(0,0,0,0.05) !important;
+        border-color: rgba(0,0,0,0.1) !important;
+        color: #1E293B !important;
+    }
+
+    /* List items */
+    html[data-theme="light"] .requirement-item {
+        background: rgba(99,102,241,0.07) !important;
+        color: #1E293B !important;
+        border-left-color: #6366F1 !important;
+    }
+    html[data-theme="light"] .pain-item {
+        background: rgba(244,63,94,0.06) !important;
+        color: #1E293B !important;
+    }
+    html[data-theme="light"] .goal-item {
+        background: rgba(16,185,129,0.07) !important;
+        color: #1E293B !important;
+    }
+    html[data-theme="light"] .constraint-item {
+        background: rgba(245,158,11,0.07) !important;
+        color: #1E293B !important;
+    }
+
+    /* Inputs & textareas */
+    html[data-theme="light"] div[data-baseweb="input"] div,
+    html[data-theme="light"] div[data-baseweb="input"] { background: #FFFFFF !important; border-color: rgba(0,0,0,0.12) !important; }
+    html[data-theme="light"] div[data-baseweb="input"] input { color: #0F172A !important; background: transparent !important; }
+    html[data-theme="light"] div[data-baseweb="textarea"] > div { background: #FFFFFF !important; border-color: rgba(0,0,0,0.12) !important; }
+    html[data-theme="light"] div[data-baseweb="textarea"] textarea { color: #0F172A !important; }
+    html[data-theme="light"] label[data-testid="stWidgetLabel"] { color: #475569 !important; }
+
+    /* Buttons: primary stays indigo, secondary gets light border */
+    html[data-theme="light"] button[kind="secondary"] {
+        border-color: rgba(0,0,0,0.15) !important;
+        color: #475569 !important;
+        background: rgba(0,0,0,0.03) !important;
+    }
+    html[data-theme="light"] button[kind="secondary"]:hover {
+        border-color: rgba(99,102,241,0.4) !important;
+        color: #6366F1 !important;
+        background: rgba(99,102,241,0.06) !important;
+    }
+
+    /* Toggle */
+    html[data-theme="light"] [data-testid="stToggle"] span { border-color: rgba(0,0,0,0.2) !important; }
+
+    /* Alerts & info boxes */
+    html[data-theme="light"] [data-testid="stAlert"] { background: rgba(99,102,241,0.07) !important; }
+    html[data-theme="light"] [data-testid="stAlert"] div { color: #334155 !important; }
+
+    /* Expanders */
+    html[data-theme="light"] [data-testid="stExpander"] { border-color: rgba(0,0,0,0.1) !important; }
+    html[data-theme="light"] [data-testid="stExpander"] summary { color: #334155 !important; }
+
+    /* Code blocks */
+    html[data-theme="light"] code { background: rgba(0,0,0,0.05) !important; color: #1E293B !important; }
+    html[data-theme="light"] pre code { background: rgba(0,0,0,0.04) !important; }
+
+    /* Tabs */
+    html[data-theme="light"] [data-testid="stTabs"] [role="tab"] { color: #64748B !important; }
+    html[data-theme="light"] [data-testid="stTabs"] [role="tab"][aria-selected="true"] { color: #6366F1 !important; }
+
+    /* DataFrames */
+    html[data-theme="light"] [data-testid="stDataFrame"] { background: #FFFFFF !important; }
+
+    /* Caption & small text */
+    html[data-theme="light"] [data-testid="stCaptionContainer"] p { color: #64748B !important; }
+
+    /* Selectbox */
+    html[data-theme="light"] div[data-baseweb="select"] > div { background: #FFFFFF !important; border-color: rgba(0,0,0,0.12) !important; color: #1E293B !important; }
+
+    /* File uploader */
+    html[data-theme="light"] [data-testid="stFileUploader"] { background: rgba(0,0,0,0.02) !important; border-color: rgba(0,0,0,0.1) !important; }
+    html[data-theme="light"] [data-testid="stFileUploader"] label { color: #475569 !important; }
+
+    /* Status badges override for light */
+    html[data-theme="light"] .status-completed { background: rgba(5,150,105,0.08) !important; color: #059669 !important; border-color: rgba(5,150,105,0.2) !important; }
+    html[data-theme="light"] .status-pending { background: rgba(100,116,139,0.08) !important; color: #475569 !important; }
+    html[data-theme="light"] .status-active { background: rgba(99,102,241,0.08) !important; color: #6366F1 !important; }
+
+    /* ══════════════════════════════════════════════════════════
+       SYSTEM THEME — prefers-color-scheme media queries
+       Only active when html has no data-theme or data-theme="system"
+       ══════════════════════════════════════════════════════════ */
+    @media (prefers-color-scheme: light) {
+        html:not([data-theme="dark"]):not([data-theme="light"]) .stApp { background: #F1F5F9 !important; }
+        html:not([data-theme="dark"]):not([data-theme="light"]) [data-testid="stSidebar"] { background: #FFFFFF !important; }
     }
 </style>
 """, unsafe_allow_html=True)
  
 # -------------------------------------------------------------
+# Theme applicator — injects JS to set data-theme on <html>
+# -------------------------------------------------------------
+def _apply_theme(theme: str) -> None:
+    """Apply dark/light/system theme by setting data-theme attr on the parent document's <html>."""
+    js = (
+        "(function(){{"
+        "var t='{t}',r=t;"
+        "if(t==='system'){{r=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';}}"
+        "var d=window.parent?window.parent.document:document;"
+        "d.documentElement.setAttribute('data-theme',r);"
+        "if(t==='system'){{"
+        "window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',function(e){{"
+        "d.documentElement.setAttribute('data-theme',e.matches?'dark':'light');}})"
+        "}}"
+        "}})();"
+    ).format(t=theme)
+    components.html(f"<script>{js}</script>", height=0, scrolling=False)
+
+
+# -------------------------------------------------------------
 # Session State Initialization
 # -------------------------------------------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
+if "app_theme" not in st.session_state:
+    st.session_state.app_theme = "dark"
 if "selected_project" not in st.session_state:
     st.session_state.selected_project = None
 if "auth_mode" not in st.session_state:
@@ -366,43 +684,86 @@ def reset_planning_pipeline():
 # Authentication Screen
 # -------------------------------------------------------------
 def render_auth_page():
-    st.markdown('<div class="main-title" style="text-align: center;">⚡ AI-Powered POC Generator</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subtitle" style="text-align: center;">Transform client conversations into production-ready project plans.</div>', unsafe_allow_html=True)
- 
-    col1, col2, col3 = st.columns([1, 1.5, 1])
- 
+    # Apply current theme
+    _apply_theme(st.session_state.get("app_theme", "dark"))
+
+    # Small theme toggle top-right
+    _spacer, _th_col = st.columns([5, 1])
+    with _th_col:
+        _t = st.session_state.get("app_theme", "dark")
+        _icons = {"dark": "🌙", "light": "☀️", "system": "💻"}
+        _cycle = {"dark": "light", "light": "system", "system": "dark"}
+        if st.button(_icons[_t], key="auth_theme_cycle", help="Toggle theme"):
+            st.session_state.app_theme = _cycle[_t]
+            st.rerun()
+
+    # Full-page centering spacer
+    st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1.35, 1])
+
     with col2:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="accent-bar"></div>', unsafe_allow_html=True)
- 
-        if st.session_state.auth_mode == "login":
-            st.subheader("Sign In")
-            email = st.text_input("Email Address", placeholder="name@company.com", key="login_email")
+        # ── Brand header (pure HTML — no widgets, so no empty-box issue) ──
+        is_login = st.session_state.auth_mode == "login"
+        mode_title = "Sign In" if is_login else "Create Account"
+        mode_sub   = "Welcome back — sign in to continue." if is_login else "Create your account to get started."
+
+        st.markdown(
+            f'<div style="text-align:center;padding:1.75rem 0 1.25rem">'
+            f'<div style="display:inline-flex;align-items:center;justify-content:center;'
+            f'width:46px;height:46px;border-radius:12px;'
+            f'background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.3);'
+            f'font-size:1.3rem;margin-bottom:0.65rem">⚡</div>'
+            f'<div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.12em;color:#475569;margin-bottom:0.35rem">AI-Powered POC Generator</div>'
+            f'<div style="font-size:1.45rem;font-weight:700;color:#E2E8F0;letter-spacing:-0.4px;'
+            f'line-height:1.2;margin-bottom:0.3rem">{mode_title}</div>'
+            f'<div style="font-size:0.8rem;color:#475569">{mode_sub}</div>'
+            f'</div>'
+            f'<div style="height:1px;background:linear-gradient(90deg,transparent,'
+            f'rgba(99,102,241,0.5),transparent);margin-bottom:1.4rem"></div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Form widgets render naturally — no wrapping div ───────────────
+        if is_login:
+            email    = st.text_input("Email Address", placeholder="name@company.com", key="login_email")
             password = st.text_input("Password", type="password", placeholder="••••••••", key="login_password")
- 
-            if st.button("Log In", type="primary", use_container_width=True, key="login_btn"):
+
+            st.markdown('<div style="height:0.35rem"></div>', unsafe_allow_html=True)
+
+            if st.button("Sign In", type="primary", use_container_width=True, key="login_btn"):
                 if not email or not password:
                     st.error("Please fill in all fields.")
                 else:
                     try:
                         res = db.sign_in(email, password)
                         st.session_state.user = res.user
-                        st.success("Successfully logged in!")
+                        st.success("Signed in successfully.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Login failed: {e}")
- 
-            st.markdown("---")
-            if st.button("Don't have an account? Sign Up", use_container_width=True, key="goto_signup"):
+
+            st.markdown(
+                '<div style="display:flex;align-items:center;gap:0.75rem;margin:1rem 0">'
+                '<div style="flex:1;height:1px;background:rgba(255,255,255,0.07)"></div>'
+                '<div style="font-size:0.72rem;color:#334155;white-space:nowrap">or</div>'
+                '<div style="flex:1;height:1px;background:rgba(255,255,255,0.07)"></div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            if st.button("Create an account", use_container_width=True, key="goto_signup"):
                 st.session_state.auth_mode = "signup"
                 st.rerun()
- 
+
         else:
-            st.subheader("Create Account")
-            email = st.text_input("Email Address", placeholder="name@company.com", key="signup_email")
+            email    = st.text_input("Email Address", placeholder="name@company.com", key="signup_email")
             password = st.text_input("Password", type="password", placeholder="At least 6 characters", key="signup_password")
- 
-            if st.button("Sign Up", type="primary", use_container_width=True, key="signup_btn"):
+
+            st.markdown('<div style="height:0.35rem"></div>', unsafe_allow_html=True)
+
+            if st.button("Create Account", type="primary", use_container_width=True, key="signup_btn"):
                 if not email or not password:
                     st.error("Please fill in all fields.")
                 elif len(password) < 6:
@@ -415,22 +776,39 @@ def render_auth_page():
                         st.rerun()
                     except Exception as e:
                         st.error(f"Sign up failed: {e}")
- 
-            st.markdown("---")
-            if st.button("Already have an account? Log In", use_container_width=True, key="goto_login"):
+
+            st.markdown(
+                '<div style="display:flex;align-items:center;gap:0.75rem;margin:1rem 0">'
+                '<div style="flex:1;height:1px;background:rgba(255,255,255,0.07)"></div>'
+                '<div style="font-size:0.72rem;color:#334155;white-space:nowrap">or</div>'
+                '<div style="flex:1;height:1px;background:rgba(255,255,255,0.07)"></div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+            if st.button("Already have an account? Sign In", use_container_width=True, key="goto_login"):
                 st.session_state.auth_mode = "login"
                 st.rerun()
- 
-        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── Footer note ────────────────────────────────────────────────────
+        st.markdown(
+            '<div style="text-align:center;margin-top:1.5rem;font-size:0.72rem;color:#1E293B">'
+            'Powered by Gemini AI &nbsp;·&nbsp; Secured by Supabase'
+            '</div>',
+            unsafe_allow_html=True,
+        )
  
 # -------------------------------------------------------------
 # Render Task Agent Results (HITL)
 # -------------------------------------------------------------
 def render_task_agent_section(transcript: str, project_id: str):
-    st.markdown("---")
-    st.markdown("### 🤖 Step 2: Task Identification Agent")
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="accent-bar-green"></div>'
+        + _step_header("2", "Task Identification Agent",
+            "Extract requirements, pain points, constraints & business goals from the transcript",
+            "green"),
+        unsafe_allow_html=True,
+    )
  
     col_run, col_status = st.columns([2, 1])
  
@@ -518,13 +896,37 @@ def render_task_agent_section(transcript: str, project_id: str):
             key="hitl1_feedback",
         )
 
-        hitl_col1, hitl_col2 = st.columns(2)
+        hitl_col1, hitl_col2, _ = st.columns([1, 1, 2])
 
         with hitl_col1:
-            if st.button("✅ Approve & Continue", type="primary", use_container_width=True, key="approve_btn"):
+            if st.button("✅ Approve & Auto-Run", type="primary", use_container_width=True, key="approve_btn"):
                 st.session_state.approved_requirements = output.model_dump()
                 reset_planning_pipeline()
-                st.success("Requirements approved! Ready for the Planning Agent.")
+                _pid = (st.session_state.selected_project or {}).get("id")
+
+                # ── Auto-run Planning Agent ────────────────────────────────
+                _plan_ok = False
+                with st.spinner("🏗️ Running Planning Agent…"):
+                    try:
+                        _plan_result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
+                        st.session_state.plan_output = _plan_result
+                        _plan_ok = True
+                    except Exception as _e:
+                        st.error(f"Planning Agent failed: {_e}")
+
+                # ── Auto-run Feasibility Agent (only if planning succeeded) ─
+                if _plan_ok:
+                    with st.spinner("🔍 Running Feasibility Agent…"):
+                        try:
+                            _feas_result = call_feasibility_agent(
+                                st.session_state.approved_requirements,
+                                _plan_result.model_dump(),
+                            )
+                            st.session_state.feasibility_output = _feas_result
+                            st.success("✅ Requirements approved — architecture & feasibility ready for review.")
+                        except Exception as _e:
+                            st.error(f"Feasibility Agent failed: {_e}")
+
                 st.rerun()
 
         with hitl_col2:
@@ -540,47 +942,54 @@ def render_task_agent_section(transcript: str, project_id: str):
                         st.error(f"Regeneration failed: {e}")
 
         # Show approved confirmation
-        if st.session_state.approved_requirements:
-            st.success("🎉 Requirements are **approved** and ready for the Planning Agent in the next phase!")
- 
-    st.markdown('</div>', unsafe_allow_html=True)
+        if st.session_state.approved_requirements and st.session_state.plan_output and st.session_state.feasibility_output:
+            st.success("🎉 Requirements approved — Planning and Feasibility complete. Review them below then approve.")
+
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------
 # Render Planning Agent Results
 # -------------------------------------------------------------
 def render_planning_agent_section():
-    st.markdown("---")
-    st.markdown("### 🏗️ Step 3: Planning Agent")
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="accent-bar-purple"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="accent-bar-purple"></div>'
+        + _step_header("3", "Planning Agent",
+            "Generate technical architecture, tech stack & system diagram from approved requirements",
+            "violet"),
+        unsafe_allow_html=True,
+    )
 
     col_run, col_status = st.columns([2, 1])
 
     with col_run:
-        st.markdown(
-            "**Run the Planning Agent** to generate a technical architecture, tech stack, "
-            "and Mermaid diagram from your approved requirements."
-        )
+        if st.session_state.plan_output:
+            st.markdown("Architecture generated automatically after HITL #1 approval. Re-run to regenerate.")
+        else:
+            st.markdown("Runs automatically when you approve HITL #1. You can also trigger it manually.")
 
     with col_status:
         if st.session_state.plan_output:
             st.markdown("<span class='status-badge status-completed'>✅ COMPLETED</span>", unsafe_allow_html=True)
         else:
-            st.markdown("<span class='status-badge status-pending'>PENDING</span>", unsafe_allow_html=True)
+            st.markdown("<span class='status-badge status-pending'>AUTO / MANUAL</span>", unsafe_allow_html=True)
 
-    if st.button("▶ Run Planning Agent", type="primary", key="run_planning_agent_btn"):
-        with st.spinner("🏗️ Gemini is designing the architecture..."):
-            try:
-                _pid = (st.session_state.selected_project or {}).get("id")
-                result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
-                st.session_state.plan_output = result
-                st.session_state.feasibility_output = None
-                st.session_state.approved_plan = None
-                st.success("✅ Planning Agent completed successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Planning Agent failed: {e}")
+    _plan_btn_col, _ = st.columns([1, 3])
+    with _plan_btn_col:
+        _plan_label = "🔄 Re-run Planning Agent" if st.session_state.plan_output else "▶ Run Planning Agent"
+        if st.button(_plan_label, type="primary" if not st.session_state.plan_output else "secondary",
+                     key="run_planning_agent_btn", use_container_width=True):
+            with st.spinner("🏗️ Gemini is designing the architecture..."):
+                try:
+                    _pid = (st.session_state.selected_project or {}).get("id")
+                    result = call_planning_agent(st.session_state.approved_requirements, project_id=_pid)
+                    st.session_state.plan_output = result
+                    st.session_state.feasibility_output = None
+                    st.session_state.approved_plan = None
+                    st.success("✅ Planning Agent completed successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Planning Agent failed: {e}")
 
     if st.session_state.plan_output:
         plan = st.session_state.plan_output
@@ -614,45 +1023,52 @@ def render_planning_agent_section():
             with st.expander("📝 Diagram Source (Mermaid)", expanded=False):
                 st.code(plan.mermaid_diagram, language="mermaid")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------
 # Render Feasibility Agent + HITL #2
 # -------------------------------------------------------------
 def render_feasibility_section():
-    st.markdown("---")
-    st.markdown("### 🔍 Step 4: Feasibility Study")
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="accent-bar"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="accent-bar"></div>'
+        + _step_header("4", "Feasibility Study",
+            "Evaluate technical risks, complexity & viability of the proposed architecture",
+            "indigo"),
+        unsafe_allow_html=True,
+    )
 
     col_run, col_status = st.columns([2, 1])
 
     with col_run:
-        st.markdown(
-            "**Run the Feasibility Agent** to evaluate technical risks, complexity, "
-            "and viability of the proposed plan."
-        )
+        if st.session_state.feasibility_output:
+            st.markdown("Feasibility generated automatically after HITL #1 approval. Re-run to regenerate.")
+        else:
+            st.markdown("Runs automatically after Planning Agent. You can also trigger it manually.")
 
     with col_status:
         if st.session_state.feasibility_output:
             st.markdown("<span class='status-badge status-completed'>✅ COMPLETED</span>", unsafe_allow_html=True)
         else:
-            st.markdown("<span class='status-badge status-pending'>PENDING</span>", unsafe_allow_html=True)
+            st.markdown("<span class='status-badge status-pending'>AUTO / MANUAL</span>", unsafe_allow_html=True)
 
-    if st.button("▶ Run Feasibility Agent", type="primary", key="run_feasibility_agent_btn"):
-        with st.spinner("🔍 Gemini is assessing feasibility..."):
-            try:
-                result = call_feasibility_agent(
-                    st.session_state.approved_requirements,
-                    st.session_state.plan_output.model_dump(),
-                )
-                st.session_state.feasibility_output = result
-                st.session_state.approved_plan = None
-                st.success("✅ Feasibility Agent completed successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Feasibility Agent failed: {e}")
+    _feas_btn_col, _ = st.columns([1, 3])
+    with _feas_btn_col:
+        _feas_label = "🔄 Re-run Feasibility Agent" if st.session_state.feasibility_output else "▶ Run Feasibility Agent"
+        if st.button(_feas_label, type="primary" if not st.session_state.feasibility_output else "secondary",
+                     key="run_feasibility_agent_btn", use_container_width=True):
+            with st.spinner("🔍 Gemini is assessing feasibility..."):
+                try:
+                    result = call_feasibility_agent(
+                        st.session_state.approved_requirements,
+                        st.session_state.plan_output.model_dump(),
+                    )
+                    st.session_state.feasibility_output = result
+                    st.session_state.approved_plan = None
+                    st.success("✅ Feasibility Agent completed successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Feasibility Agent failed: {e}")
 
     if st.session_state.feasibility_output:
         feasibility = st.session_state.feasibility_output
@@ -699,7 +1115,7 @@ def render_feasibility_section():
         else:
             st.info("No technical risks identified.")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------
@@ -774,10 +1190,13 @@ def _estimation_col_config(structural_cols: list, tech_cols: list, include_mvp: 
 # Render Estimation Agent Results + HITL
 # -------------------------------------------------------------
 def render_estimation_section():
-    st.markdown("---")
-    st.markdown("### 📊 Step 5: Effort Estimation")
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="accent-bar-green"></div>'
+        + _step_header("5", "Effort Estimation",
+            "Generate Work Breakdown Structure with per-module, per-role hour estimates",
+            "green"),
+        unsafe_allow_html=True,
+    )
 
     col_run, col_status = st.columns([2, 1])
 
@@ -836,12 +1255,27 @@ def render_estimation_section():
                      column_config=_estimation_col_config(struct_cols, tech_cols, _include_mvp))
 
         totals = estimation.totals
-        st.markdown(f"**Grand Total: {totals.total_hours} hrs**")
+        st.markdown(
+            f'<div style="font-size:0.8rem;font-weight:600;color:#94A3B8;margin-bottom:0.6rem">'
+            f'Grand Total: <span style="color:#E2E8F0;font-size:0.95rem">{totals.total_hours} hrs</span></div>',
+            unsafe_allow_html=True,
+        )
 
         if totals.tech_breakdown:
-            metric_cols = st.columns(min(len(totals.tech_breakdown), 6))
-            for col, (tech, hrs) in zip(metric_cols, totals.tech_breakdown.items()):
-                col.metric(f"{tech} (hrs)", hrs)
+            items = list(totals.tech_breakdown.items())
+            metric_cols = st.columns(min(len(items), 6))
+            for col, (tech, hrs) in zip(metric_cols, items):
+                with col:
+                    st.markdown(
+                        f'<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);'
+                        f'border-radius:8px;padding:0.45rem 0.6rem;text-align:center;margin-bottom:0.4rem">'
+                        f'<div style="font-size:0.6rem;color:#475569;text-transform:uppercase;letter-spacing:0.08em;'
+                        f'font-weight:700;margin-bottom:0.15rem">{tech}</div>'
+                        f'<div style="font-size:1rem;font-weight:700;color:#E2E8F0;line-height:1">{hrs}'
+                        f'<span style="font-size:0.62rem;color:#475569;margin-left:2px">hrs</span></div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
 
         if _include_mvp and totals.phase1_hours is not None:
             st.markdown(
@@ -863,16 +1297,13 @@ def render_estimation_section():
             key="dl_est_excel",
         )
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------
 # Unified HITL #2: Review Plan + Feasibility + Estimation
 # -------------------------------------------------------------
 def render_hitl2_section():
-    st.markdown("---")
-    st.markdown("### 🧑‍💼 HITL #2: Final Review")
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
 
     st.markdown(
@@ -998,224 +1429,316 @@ def render_hitl2_section():
     if st.session_state.approved_estimation:
         st.success("🎉 All outputs are **approved**! Report generation is the next phase.")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------
 # Report Agent Section
 # -------------------------------------------------------------
 def render_report_section():
-    st.markdown("---")
-    st.markdown("### 📋 Step 7: Final Report")
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<div class="accent-bar-purple"></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="accent-bar-purple"></div>'
+        + _step_header("7", "Final Report",
+            "12-section professional consulting report — suitable for client, business & technical review",
+            "violet"),
+        unsafe_allow_html=True,
+    )
 
     if not st.session_state.report_output:
+        st.markdown(
+            "Generate a professional 12-section consulting report from all approved agent outputs. "
+            "The report is suitable for Client Review, Business Review, Technical Review, "
+            "Project Planning, and Effort Estimation Review."
+        )
         if st.button("▶ Generate Final Report", type="primary", use_container_width=True, key="run_report_btn"):
             approved_req = st.session_state.approved_requirements or {}
             approved_plan = st.session_state.approved_plan or (st.session_state.plan_output.model_dump() if st.session_state.plan_output else {})
             approved_feas = st.session_state.approved_feasibility or (st.session_state.feasibility_output.model_dump() if st.session_state.feasibility_output else {})
             approved_est = st.session_state.approved_estimation or (st.session_state.estimation_output.model_dump() if st.session_state.estimation_output else {})
 
-            st.session_state.report_output = {
-                "requirements": approved_req,
-                "plan": approved_plan,
-                "feasibility": approved_feas,
-                "estimation": approved_est,
-            }
-            st.success("✅ Final Report compiled successfully!")
-            st.rerun()
+            with st.spinner("Generating consulting report... this may take a minute."):
+                try:
+                    result = call_report_agent(approved_req, approved_plan, approved_feas, approved_est)
+                    st.session_state.report_output = result.model_dump()
+                    st.success("✅ Final Report generated successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Report generation failed: {e}")
     else:
         report = st.session_state.report_output
-        req_data = report.get("requirements", {})
-        plan_data = report.get("plan", {})
-        feas_data = report.get("feasibility", {})
-        est_data = report.get("estimation", {})
+        raw = report.get("raw_data", {})
+        plan_data = raw.get("plan", {})
+        est_data = raw.get("estimation", {})
+        mermaid = plan_data.get("mermaid_diagram", "")
 
-        # ── 1. REQUIREMENTS (same as Task Agent output) ──
-        st.markdown("#### 📋 Requirements Analysis")
-        if req_data:
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔴 Pain Points", "✅ Requirements", "⚠️ Constraints", "🎯 Business Goals", "💻 Tech Context"])
-            with tab1:
-                for item in req_data.get("pain_points", []):
-                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
-            with tab2:
-                for item in req_data.get("requirements", []):
-                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
-            with tab3:
-                for item in req_data.get("constraints", []):
-                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
-            with tab4:
-                for item in req_data.get("business_goals", []):
-                    st.markdown(f'<div class="requirement-item">• {item}</div>', unsafe_allow_html=True)
-            with tab5:
-                tech_ctx = req_data.get("technology_context", {})
-                if tech_ctx:
-                    for category, description in tech_ctx.items():
-                        label = category.replace("_", " ").title()
-                        st.markdown(f'<div class="requirement-item"><strong>{label}:</strong> {description}</div>', unsafe_allow_html=True)
-                else:
-                    st.info("No technology context extracted.")
-        else:
-            st.info("No requirements data.")
+        col_regen, _ = st.columns([1, 3])
+        with col_regen:
+            if st.button("🔄 Regenerate Report", key="regen_report_btn"):
+                st.session_state.report_output = None
+                st.rerun()
 
+        # ── 1. Executive Summary ──────────────────────────────────────────
+        st.markdown("#### 1. Executive Summary")
+        st.markdown(report.get("executive_summary", ""))
         st.markdown("---")
 
-        # ── 2. PLANNING (same as Planning Agent output) ──
-        st.markdown("#### 🏗️ Architecture & Planning")
-        if plan_data:
-            st.markdown(f"##### 🧩 Architecture: **{plan_data.get('architecture_type', 'N/A')}**")
-
-            tech_stack = plan_data.get("tech_stack", {})
-            rec_reasons = plan_data.get("recommendation_reason", {})
-            if tech_stack:
-                st.markdown("##### 🛠️ Tech Stack")
-                for category, tech in tech_stack.items():
-                    reason = rec_reasons.get(category, "")
-                    label = category.replace("_", " ").title()
-                    st.markdown(f"**{label}:** {tech}")
-                    if reason:
-                        st.caption(reason)
-
-            arch_summary = plan_data.get("architecture_summary", {})
-            if arch_summary:
-                st.markdown("##### 📐 Architecture Summary")
-                st.markdown(f"**Overview:** {arch_summary.get('overview', '')}")
-                st.markdown(f"**Workflow:** {arch_summary.get('workflow', '')}")
-                st.markdown(f"**Data Flow:** {arch_summary.get('data_flow', '')}")
-
-            ref_docs = plan_data.get("reference_docs", [])
-            if ref_docs:
-                st.markdown("##### 📚 Reference Docs")
-                for doc in ref_docs:
-                    st.markdown(f"- [{doc.get('title', '')}]({doc.get('url', '')})")
-
-            mermaid = plan_data.get("mermaid_diagram", "")
-            if mermaid:
-                st.markdown("##### 🗺️ Architecture Diagram")
-                with st.expander("📊 View Architecture Diagram", expanded=True):
-                    render_mermaid_diagram(mermaid)
-                with st.expander("📝 Diagram Source (Mermaid)", expanded=False):
-                    st.code(mermaid, language="mermaid")
-        else:
-            st.info("No planning data.")
-
+        # ── 2. Background Summary ─────────────────────────────────────────
+        st.markdown("#### 2. Background Summary")
+        st.markdown(report.get("background_summary", ""))
         st.markdown("---")
 
-        # ── 3. FEASIBILITY (same as Feasibility Agent output) ──
-        st.markdown("#### 🔍 Feasibility Assessment")
-        if feas_data:
-            metric_col1, metric_col2, metric_col3 = st.columns(3)
-            with metric_col1:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.markdown('<div class="metric-label">Complexity</div>', unsafe_allow_html=True)
-                st.markdown(level_badge_html(feas_data.get("complexity_level", ""), COMPLEXITY_BADGES), unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+        # ── 3. Problem / Need Analysis ────────────────────────────────────
+        st.markdown("#### 3. Problem / Need Analysis")
+        pna = report.get("problem_need_analysis", [])
+        if pna:
+            df_pna = pd.DataFrame([
+                {"Problem / Need": r.get("problem_need", ""), "Business Impact": r.get("business_impact", "")}
+                for r in pna
+            ])
+            st.dataframe(df_pna, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Problem / Need": st.column_config.TextColumn("Problem / Need", width="medium"),
+                             "Business Impact": st.column_config.TextColumn("Business Impact", width="large"),
+                         })
+        st.markdown("---")
 
-            arch_confidence = feas_data.get("architecture_confidence")
-            feas_confidence = feas_data.get("feasibility_confidence")
+        # ── 4. Requirements Analysis ──────────────────────────────────────
+        st.markdown("#### 4. Requirements Analysis")
+        tab_fr, tab_nfr, tab_con, tab_goals, tab_tech = st.tabs([
+            "Functional", "Non-Functional", "Constraints", "Business Goals", "Tech Context"
+        ])
 
-            with metric_col2:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.markdown('<div class="metric-label">Architecture Confidence</div>', unsafe_allow_html=True)
-                if arch_confidence:
-                    st.markdown(level_badge_html(arch_confidence, CONFIDENCE_BADGES), unsafe_allow_html=True)
-                else:
-                    st.caption("N/A")
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            with metric_col3:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.markdown('<div class="metric-label">Feasibility Confidence</div>', unsafe_allow_html=True)
-                if feas_confidence:
-                    st.markdown(level_badge_html(feas_confidence, CONFIDENCE_BADGES), unsafe_allow_html=True)
-                else:
-                    st.caption("N/A")
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            feas_summary = feas_data.get("feasibility_summary", "")
-            if feas_summary:
-                st.markdown(f"**Summary:** {feas_summary}")
-
-            risks = feas_data.get("technical_risks", [])
-            if risks:
-                st.markdown("##### ⚠️ Technical Risks")
-                for risk in risks:
-                    with st.expander(f"🔴 {risk.get('risk', '')}", expanded=False):
-                        st.markdown(f"**Impact:** {risk.get('impact', '')}")
-                        st.markdown(f"**Mitigation:** {risk.get('mitigation', '')}")
+        with tab_fr:
+            fr = report.get("functional_requirements", [])
+            if fr:
+                df_fr = pd.DataFrame([
+                    {"ID": r.get("id", ""), "Requirement": r.get("requirement", "")}
+                    for r in fr
+                ])
+                st.dataframe(df_fr, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "ID": st.column_config.TextColumn("ID", width="small"),
+                                 "Requirement": st.column_config.TextColumn("Requirement", width="large"),
+                             })
             else:
-                st.info("No technical risks identified.")
-        else:
-            st.info("No feasibility data.")
+                st.info("No functional requirements.")
+
+        with tab_nfr:
+            nfr = report.get("non_functional_requirements", [])
+            if nfr:
+                df_nfr = pd.DataFrame([
+                    {"Category": r.get("category", ""), "Requirement": r.get("requirement", "")}
+                    for r in nfr
+                ])
+                st.dataframe(df_nfr, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "Category": st.column_config.TextColumn("Category", width="small"),
+                                 "Requirement": st.column_config.TextColumn("Requirement", width="large"),
+                             })
+            else:
+                st.info("No non-functional requirements.")
+
+        with tab_con:
+            constraints = report.get("constraints", [])
+            if constraints:
+                df_con = pd.DataFrame([{"Constraint": c} for c in constraints])
+                st.dataframe(df_con, use_container_width=True, hide_index=True)
+            else:
+                st.info("No constraints.")
+
+        with tab_goals:
+            goals = report.get("business_goals", [])
+            if goals:
+                df_goals = pd.DataFrame([{"Goal": g} for g in goals])
+                st.dataframe(df_goals, use_container_width=True, hide_index=True)
+            else:
+                st.info("No business goals.")
+
+        with tab_tech:
+            tech_ctx = report.get("technology_context", [])
+            if tech_ctx:
+                df_tech = pd.DataFrame([{"Technology Context": t} for t in tech_ctx])
+                st.dataframe(df_tech, use_container_width=True, hide_index=True)
+            else:
+                st.info("No technology context.")
 
         st.markdown("---")
 
-        # ── 4. ESTIMATION (same as Estimation Agent output) ──
-        st.markdown("#### 📊 Effort Estimation")
+        # ── 5. Assumptions ────────────────────────────────────────────────
+        st.markdown("#### 5. Assumptions")
+        assumptions = report.get("assumptions", [])
+        if assumptions:
+            df_ass = pd.DataFrame([{"Assumption": a} for a in assumptions])
+            st.dataframe(df_ass, use_container_width=True, hide_index=True)
+        st.markdown("---")
+
+        # ── 6. Feature & Module Breakdown ─────────────────────────────────
+        st.markdown("#### 6. Feature & Module Breakdown")
+        fmb = report.get("feature_module_breakdown", [])
+        if fmb:
+            df_fmb = pd.DataFrame([
+                {
+                    "Module": r.get("module", ""),
+                    "Feature / Functionality": r.get("feature_functionality", ""),
+                    "Technologies Used": r.get("technologies_used", ""),
+                }
+                for r in fmb
+            ])
+            st.dataframe(df_fmb, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Module": st.column_config.TextColumn("Module", width="medium"),
+                             "Feature / Functionality": st.column_config.TextColumn("Feature / Functionality", width="large"),
+                             "Technologies Used": st.column_config.TextColumn("Technologies Used", width="medium"),
+                         })
+        st.markdown("---")
+
+        # ── 7. Final Solution Architecture ────────────────────────────────
+        st.markdown("#### 7. Final Solution Architecture")
+        if mermaid:
+            with st.expander("📊 View Architecture Diagram", expanded=True):
+                render_mermaid_diagram(mermaid)
+            with st.expander("📝 Diagram Source (Mermaid)", expanded=False):
+                st.code(mermaid, language="mermaid")
+        else:
+            st.info("Architecture diagram not available.")
+        st.markdown("---")
+
+        # ── 8. Feasibility Assessment ─────────────────────────────────────
+        st.markdown("#### 8. Feasibility Assessment")
+        ft = report.get("feasibility_table", [])
+        if ft:
+            df_ft = pd.DataFrame([
+                {"Metric": r.get("metric", ""), "Value": r.get("value", ""), "Reason": r.get("reason", "")}
+                for r in ft
+            ])
+            st.dataframe(df_ft, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Metric": st.column_config.TextColumn("Metric", width="small"),
+                             "Value": st.column_config.TextColumn("Value", width="small"),
+                             "Reason": st.column_config.TextColumn("Reason", width="large"),
+                         })
+        st.markdown("---")
+
+        # ── 9. Risk Assessment ────────────────────────────────────────────
+        st.markdown("#### 9. Risk Assessment")
+        ra = report.get("risk_assessment", [])
+        if ra:
+            df_ra = pd.DataFrame([
+                {
+                    "Risk": r.get("risk", ""),
+                    "Impact": r.get("impact", ""),
+                    "Mitigation Strategy": r.get("mitigation_strategy", ""),
+                }
+                for r in ra
+            ])
+            st.dataframe(df_ra, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Risk": st.column_config.TextColumn("Risk", width="medium"),
+                             "Impact": st.column_config.TextColumn("Impact", width="small"),
+                             "Mitigation Strategy": st.column_config.TextColumn("Mitigation Strategy", width="large"),
+                         })
+        st.markdown("---")
+
+        # ── 10. Recommendations & Next Steps ──────────────────────────────
+        st.markdown("#### 10. Recommendations & Next Steps")
+        st.markdown(report.get("recommendations_next_steps", ""))
+        st.markdown("---")
+
+        # ── 11. Architecture Summary ───────────────────────────────────────
+        st.markdown("#### 11. Architecture Summary")
+        st.markdown(report.get("architecture_summary", ""))
+        st.markdown("---")
+
+        # ── 12. Final Solution Architecture (repeated) ────────────────────
+        st.markdown("#### 12. Final Solution Architecture")
+        if mermaid:
+            with st.expander("📊 View Architecture Diagram", expanded=False):
+                render_mermaid_diagram(mermaid)
+        else:
+            st.info("Architecture diagram not available.")
+        st.markdown("---")
+
+        # ── Effort Estimation Details ─────────────────────────────────────
         if est_data:
-            estimations  = est_data.get("estimations", [])
-            totals       = est_data.get("totals", {})
-            _s_cols_r    = est_data.get("structural_columns", [])
-            _tech_cols_r = est_data.get("tech_stack_columns", [])
-            _inc_mvp_r   = st.session_state.get("include_mvp", False)
+            with st.expander("📊 Effort Estimation Details", expanded=False):
+                estimations  = est_data.get("estimations", [])
+                totals       = est_data.get("totals", {})
+                _s_cols_r    = est_data.get("structural_columns", [])
+                _tech_cols_r = est_data.get("tech_stack_columns", [])
+                _inc_mvp_r   = st.session_state.get("include_mvp", False)
 
-            if estimations:
-                df = _build_estimation_df(estimations, _s_cols_r, _tech_cols_r, include_mvp=_inc_mvp_r, totals=totals)
-                st.dataframe(df, use_container_width=True, hide_index=True,
-                             column_config=_estimation_col_config(_s_cols_r, _tech_cols_r, _inc_mvp_r))
-                st.markdown(f"**Grand Total: {totals.get('total_hours', 0)} hrs**")
-                tech_breakdown = totals.get("tech_breakdown", {})
-                if tech_breakdown:
-                    for tech, hrs in tech_breakdown.items():
-                        st.markdown(f"- {tech}: **{hrs} hrs**")
+                if estimations:
+                    df = _build_estimation_df(estimations, _s_cols_r, _tech_cols_r, include_mvp=_inc_mvp_r, totals=totals)
+                    st.dataframe(df, use_container_width=True, hide_index=True,
+                                 column_config=_estimation_col_config(_s_cols_r, _tech_cols_r, _inc_mvp_r))
+                    st.markdown(f"**Grand Total: {totals.get('total_hours', 0)} hrs**")
+                    tech_breakdown = totals.get("tech_breakdown", {})
+                    if tech_breakdown:
+                        for tech, hrs in tech_breakdown.items():
+                            st.markdown(f"- {tech}: **{hrs} hrs**")
 
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Effort Estimation")
-                buffer.seek(0)
-                st.download_button(
-                    label="📥 Download Estimation as Excel",
-                    data=buffer,
-                    file_name="effort_estimation.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="dl_report_est_excel",
-                )
-            else:
-                st.info("No estimation data.")
-        else:
-            st.info("No estimation data.")
+                    est_buffer = io.BytesIO()
+                    with pd.ExcelWriter(est_buffer, engine="openpyxl") as writer:
+                        df.to_excel(writer, index=False, sheet_name="Effort Estimation")
+                    est_buffer.seek(0)
+                    st.download_button(
+                        label="📥 Download Estimation as Excel",
+                        data=est_buffer,
+                        file_name="effort_estimation.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="dl_report_est_excel",
+                    )
 
-        # ── 5. DOWNLOADS ──
-        st.markdown("---")
+        # ── Downloads ─────────────────────────────────────────────────────
         st.markdown("#### 📥 Download Report")
-
-        json_buffer = generate_json(report)
-        d1, d2 = st.columns(2)
+        d1, d2, d3, d4 = st.columns(4)
 
         with d1:
+            docx_buf = generate_docx(report)
+            st.download_button(
+                label="📄 Word (.docx)",
+                data=docx_buf,
+                file_name="project_report.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key="dl_report_docx",
+            )
+
+        with d2:
+            pdf_buf = generate_pdf(report)
+            st.download_button(
+                label="📑 PDF (.pdf)",
+                data=pdf_buf,
+                file_name="project_report.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="dl_report_pdf",
+            )
+
+        with d3:
+            json_buf = generate_json(report)
             st.download_button(
                 label="📋 JSON (.json)",
-                data=json_buffer,
+                data=json_buf,
                 file_name="project_report.json",
                 mime="application/json",
                 use_container_width=True,
                 key="dl_report_json",
             )
 
-        with d2:
-            md_buffer = generate_markdown(report)
+        with d4:
+            md_buf = generate_markdown(report)
             st.download_button(
                 label="📝 Markdown (.md)",
-                data=md_buffer,
+                data=md_buf,
                 file_name="project_report.md",
                 mime="text/markdown",
                 use_container_width=True,
                 key="dl_report_md",
             )
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
 
 # -------------------------------------------------------------
@@ -1225,8 +1748,18 @@ def render_dashboard():
     user = st.session_state.user
  
     # --- Sidebar ---
-    st.sidebar.markdown("### 👤 Active User")
-    st.sidebar.info(f"{user.email}")
+    st.sidebar.markdown(
+        '<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:0.1em;color:#334155;padding-bottom:0.4rem">Signed In As</div>',
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown(
+        f'<div style="font-size:0.85rem;color:#94A3B8;font-weight:500;'
+        f'padding:0.5rem 0.75rem;background:rgba(255,255,255,0.04);border-radius:7px;'
+        f'border:1px solid rgba(255,255,255,0.07);margin-bottom:0.5rem;word-break:break-all">'
+        f'{user.email}</div>',
+        unsafe_allow_html=True,
+    )
  
     if st.sidebar.button("Sign Out", use_container_width=True, key="signout_btn"):
         try:
@@ -1241,8 +1774,12 @@ def render_dashboard():
         reset_planning_pipeline()
         st.rerun()
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📁 Project Management")
+    st.sidebar.markdown(
+        '<div style="height:1px;background:rgba(255,255,255,0.06);margin:0.75rem 0"></div>'
+        '<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:0.1em;color:#334155;padding-bottom:0.5rem">Projects</div>',
+        unsafe_allow_html=True,
+    )
  
     try:
         projects = _cached_get_projects(user.id)
@@ -1292,7 +1829,11 @@ def render_dashboard():
         on_change=_on_project_change,
     )
  
-    st.sidebar.markdown("#### Create New Project")
+    st.sidebar.markdown(
+        '<div style="font-size:0.72rem;font-weight:600;color:#475569;margin-top:0.75rem;margin-bottom:0.25rem">'
+        'Create New Project</div>',
+        unsafe_allow_html=True,
+    )
     new_proj_name = st.sidebar.text_input("Project Name", placeholder="e.g. Client X - Core POC", key="new_proj_input")
     if st.sidebar.button("Add Project", type="primary", use_container_width=True, key="add_proj_btn"):
         if not new_proj_name.strip():
@@ -1311,9 +1852,14 @@ def render_dashboard():
                 st.sidebar.error(f"Failed to create project: {e}")
  
     # --- Reference Document Upload (RAG) ---
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📚 Reference Documents")
-    st.sidebar.caption("Optional — upload SOW, BRD, specs, or prior estimates to enrich AI context")
+    st.sidebar.markdown(
+        '<div style="height:1px;background:rgba(255,255,255,0.06);margin:0.75rem 0"></div>'
+        '<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:0.1em;color:#334155;padding-bottom:0.25rem">Reference Documents</div>'
+        '<div style="font-size:0.75rem;color:#334155;margin-bottom:0.5rem">'
+        'Upload SOW, BRD, specs or prior estimates to enrich AI context</div>',
+        unsafe_allow_html=True,
+    )
 
     if st.session_state.selected_project:
         _rag_pid = st.session_state.selected_project["id"]
@@ -1358,10 +1904,6 @@ def render_dashboard():
         st.sidebar.caption("Select a project to upload documents.")
 
     # --- Pipeline status in sidebar ---
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚡ Pipeline Status")
-
-    # Use session state flag set by the transcript section — avoids a sidebar Supabase call
     transcript_done = bool(st.session_state.get("_transcript_exists", False))
     task_done = bool(st.session_state.task_output)
     approved_done = bool(st.session_state.approved_requirements)
@@ -1372,32 +1914,80 @@ def render_dashboard():
     estimation_approved_done = bool(st.session_state.approved_estimation)
     report_done = bool(st.session_state.report_output)
 
-    st.sidebar.markdown(f"{'✅' if transcript_done else '⬜'} Transcript Upload")
-    st.sidebar.markdown(f"{'✅' if task_done else '⬜'} Task Agent")
-    st.sidebar.markdown(f"{'✅' if approved_done else '⬜'} HITL #1 (Requirements)")
-    st.sidebar.markdown(f"{'✅' if plan_done else '⬜'} Planning Agent")
-    st.sidebar.markdown(f"{'✅' if feasibility_done else '⬜'} Feasibility Agent")
-    st.sidebar.markdown(f"{'✅' if feasibility_approved_done else '⬜'} HITL #2 (Feasibility)")
-    st.sidebar.markdown(f"{'✅' if estimation_done else '⬜'} Estimation Agent")
-    st.sidebar.markdown(f"{'✅' if estimation_approved_done else '⬜'} HITL #3 (Estimation)")
-    st.sidebar.markdown(f"{'✅' if report_done else '⬜'} Report Agent")
- 
+    pipeline_steps = [
+        ("Transcript Upload",       transcript_done),
+        ("Task Agent",              task_done),
+        ("HITL #1 — Requirements",  approved_done),
+        ("Planning Agent",          plan_done),
+        ("Feasibility Agent",       feasibility_done),
+        ("HITL #2 — Plan & Feas.",  feasibility_approved_done),
+        ("Estimation Agent",        estimation_done),
+        ("HITL #3 — Estimation",    estimation_approved_done),
+        ("Final Report",            report_done),
+    ]
+    completed = sum(1 for _, d in pipeline_steps if d)
+    total = len(pipeline_steps)
+
+    st.sidebar.markdown(
+        '<div style="height:1px;background:rgba(255,255,255,0.06);margin:0.75rem 0"></div>'
+        f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem">'
+        f'<div style="font-size:0.68rem;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.1em;color:#334155">Pipeline Progress</div>'
+        f'<div style="font-size:0.75rem;font-weight:600;color:#{"34D399" if completed==total else "6366F1"}">'
+        f'{completed}/{total}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown(_pipeline_html(pipeline_steps), unsafe_allow_html=True)
+
+    # Apply theme (JS sets data-theme attr on <html>)
+    _apply_theme(st.session_state.get("app_theme", "dark"))
+
     # --- Main Content ---
-    st.markdown('<div class="main-title">⚡ AI-Powered POC Generator</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subtitle">Transform client conversations into production-ready project plans.</div>', unsafe_allow_html=True)
- 
+    # Theme toggle + page title row
+    _hdr_left, _hdr_right = st.columns([5, 1])
+    with _hdr_left:
+        st.markdown(
+            '<div class="main-title"><span style="color:#6366F1">⚡</span> AI-Powered POC Generator</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="subtitle">Transform client conversations into production-ready project plans &amp; estimates.</div>',
+            unsafe_allow_html=True,
+        )
+    with _hdr_right:
+        _ct = st.session_state.get("app_theme", "dark")
+        _th_info = {"dark": ("🌙", "Light", "light"), "light": ("☀️", "System", "system"), "system": ("💻", "Dark", "dark")}
+        _icon, _next_label, _next = _th_info[_ct]
+        st.markdown('<div style="padding-top:0.4rem"></div>', unsafe_allow_html=True)
+        _tc1, _tc2, _tc3 = st.columns(3)
+        with _tc1:
+            if st.button("🌙", key="th_dark", help="Dark",
+                         type="primary" if _ct == "dark" else "secondary", use_container_width=True):
+                st.session_state.app_theme = "dark"; st.rerun()
+        with _tc2:
+            if st.button("☀️", key="th_light", help="Light",
+                         type="primary" if _ct == "light" else "secondary", use_container_width=True):
+                st.session_state.app_theme = "light"; st.rerun()
+        with _tc3:
+            if st.button("💻", key="th_sys", help="System",
+                         type="primary" if _ct == "system" else "secondary", use_container_width=True):
+                st.session_state.app_theme = "system"; st.rerun()
+
     if not st.session_state.selected_project:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.markdown('<div class="accent-bar"></div>', unsafe_allow_html=True)
-        st.info("👈 Please select an existing project or create a new one from the sidebar to begin.")
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.info("👈 Select an existing project or create a new one from the sidebar to get started.")
         return
- 
+
     project = st.session_state.selected_project
-    st.markdown(f"### 📂 Active Project: **{project['name']}**")
- 
+    st.markdown(
+        f'<div style="font-size:0.8rem;font-weight:600;color:#475569;text-transform:uppercase;'
+        f'letter-spacing:0.09em;margin-bottom:0.3rem">Active Project</div>'
+        f'<div style="font-size:1.2rem;font-weight:700;color:#E2E8F0;margin-bottom:1.5rem">'
+        f'{project["name"]}</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── Step 1: Transcript Upload ──────────────────────────────
-    st.markdown("### 📝 Step 1: Upload Client Meeting Transcript")
     col_left, col_right = st.columns([1.2, 0.8])
  
     existing_transcript = ""
@@ -1413,9 +2003,13 @@ def render_dashboard():
         st.session_state["current_transcript"] = ""
  
     with col_left:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="accent-bar-purple"></div>', unsafe_allow_html=True)
-        st.markdown("#### 📄 Transcript Input")
+        st.markdown(
+            '<div class="accent-bar-purple"></div>'
+            + _step_header("1", "Upload Client Meeting Transcript",
+                "Upload a PDF / DOCX / TXT file or paste transcript text directly",
+                "violet"),
+            unsafe_allow_html=True,
+        )
  
         uploaded_file = st.file_uploader(
             "Upload Meeting Transcript (PDF, DOCX, or TXT)",
@@ -1455,13 +2049,14 @@ def render_dashboard():
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to upload transcript: {e}")
- 
-        st.markdown('</div>', unsafe_allow_html=True)
- 
+
     with col_right:
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="accent-bar"></div>', unsafe_allow_html=True)
-        st.markdown("#### 📊 Transcript Preview")
+        st.markdown(
+            '<div class="accent-bar"></div>'
+            '<div style="font-size:0.78rem;font-weight:700;text-transform:uppercase;'
+            'letter-spacing:0.09em;color:#475569;margin-bottom:0.75rem">Transcript Preview</div>',
+            unsafe_allow_html=True,
+        )
  
         if existing_transcript.strip():
             st.markdown("<span class='status-badge status-completed'>✅ SAVED</span>", unsafe_allow_html=True)
@@ -1471,9 +2066,9 @@ def render_dashboard():
         else:
             st.markdown("<span class='status-badge status-pending'>NOT UPLOADED</span>", unsafe_allow_html=True)
             st.info("No transcript saved yet for this project.")
- 
-        st.markdown('</div>', unsafe_allow_html=True)
- 
+
+    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
+
     # ── Step 2: Task Agent + HITL ──────────────────────────────
     if existing_transcript.strip():
         render_task_agent_section(existing_transcript, project["id"])
@@ -1497,11 +2092,13 @@ def render_dashboard():
 
     # ── Step 4b: HITL #2 — Approve Plan + Feasibility ─────────
     if st.session_state.plan_output and st.session_state.feasibility_output:
-        st.markdown("---")
-        st.markdown("### 🧑‍💼 HITL #2: Review Plan & Feasibility")
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
-        st.markdown("Review the Planning and Feasibility outputs before proceeding to Estimation.")
+        st.markdown(
+            '<div class="accent-bar-green"></div>'
+            + _step_header("4b", "HITL #2 — Review Plan & Feasibility",
+                "Approve or refine planning and feasibility outputs before running the Estimation Agent",
+                "amber"),
+            unsafe_allow_html=True,
+        )
 
         hitl2b_feedback = st.text_area(
             "💬 What would you like to change? (optional — describe what to adjust before regenerating)",
@@ -1510,7 +2107,7 @@ def render_dashboard():
             key="hitl2b_feedback",
         )
 
-        hitl2_col1, hitl2_col2, hitl2_col3 = st.columns(3)
+        hitl2_col1, hitl2_col2, hitl2_col3, _ = st.columns([1, 1, 1, 1])
 
         with hitl2_col1:
             if st.button("✅ Approve Plan & Feasibility", type="primary", use_container_width=True, key="hitl2_approve_plan_feas_btn"):
@@ -1558,7 +2155,7 @@ def render_dashboard():
         if st.session_state.get("approved_feasibility"):
             st.success("🎉 Plan and Feasibility are **approved**! Ready for the Estimation Agent.")
 
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
     elif st.session_state.plan_output:
         st.markdown("---")
         st.info("📌 Run the Feasibility Agent above to enable HITL #2 review.")
@@ -1572,11 +2169,13 @@ def render_dashboard():
 
     # ── Step 6: HITL #3 — Approve Estimation ─────────────────
     if st.session_state.estimation_output:
-        st.markdown("---")
-        st.markdown("### 🧑‍💼 HITL #3: Review Estimation")
-        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown('<div class="accent-bar-green"></div>', unsafe_allow_html=True)
-        st.markdown("Review the effort estimation before generating the final report.")
+        st.markdown(
+            '<div class="accent-bar-green"></div>'
+            + _step_header("6", "HITL #3 — Review Estimation",
+                "Approve or refine the effort estimation before generating the final report",
+                "amber"),
+            unsafe_allow_html=True,
+        )
 
         hitl3_feedback = st.text_area(
             "💬 What would you like to change? (optional — describe what to adjust before regenerating)",
@@ -1585,7 +2184,7 @@ def render_dashboard():
             key="hitl3_est_feedback",
         )
 
-        hitl3_col1, hitl3_col2 = st.columns(2)
+        hitl3_col1, hitl3_col2, _ = st.columns([1, 1, 2])
 
         with hitl3_col1:
             if st.button("✅ Approve Estimation", type="primary", use_container_width=True, key="hitl3_approve_est_btn"):
@@ -1617,7 +2216,7 @@ def render_dashboard():
         if st.session_state.approved_estimation:
             st.success("🎉 Estimation is **approved**! Ready for the Report Agent.")
 
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
 
     # ── Step 7: Report Agent ──────────────────────────────────
     if st.session_state.approved_estimation:
