@@ -1477,18 +1477,55 @@ def render_report_section():
                 st.session_state.report_output = None
                 st.rerun()
 
+        # ── Report cover header ───────────────────────────────────────────
+        from datetime import datetime as _dt
+        _proj_name = (st.session_state.selected_project or {}).get("name", "Project")
+        st.markdown(
+            f'<div style="background:linear-gradient(135deg,rgba(99,102,241,0.18) 0%,'
+            f'rgba(124,58,237,0.12) 100%);border:1px solid rgba(99,102,241,0.3);'
+            f'border-radius:14px;padding:1.75rem 2rem;margin-bottom:1.5rem">'
+            f'<div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:0.14em;color:#818CF8;margin-bottom:0.4rem">Consulting Report</div>'
+            f'<div style="font-size:1.6rem;font-weight:800;color:#E2E8F0;letter-spacing:-0.4px;'
+            f'line-height:1.2;margin-bottom:0.5rem">{_proj_name}</div>'
+            f'<div style="display:flex;gap:1.5rem;flex-wrap:wrap">'
+            f'<span style="font-size:0.78rem;color:#64748B">📅 {_dt.now().strftime("%B %d, %Y")}</span>'
+            f'<span style="font-size:0.78rem;color:#64748B">🤖 AI-Generated POC Analysis</span>'
+            f'<span style="font-size:0.78rem;color:#64748B">📋 11-Section Report</span>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        def _rpt_section(num: str, title: str, icon: str = "", color: str = "#6366F1") -> None:
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:0.75rem;'
+                f'margin:1.5rem 0 0.75rem;padding-bottom:0.6rem;'
+                f'border-bottom:2px solid {color}33">'
+                f'<div style="min-width:28px;height:28px;border-radius:7px;'
+                f'background:{color}22;border:1px solid {color}55;color:{color};'
+                f'display:flex;align-items:center;justify-content:center;'
+                f'font-size:0.78rem;font-weight:800;flex-shrink:0">{num}</div>'
+                f'<div style="font-size:1.05rem;font-weight:700;color:#E2E8F0">'
+                f'{icon} {title}</div></div>',
+                unsafe_allow_html=True,
+            )
+
         # ── 1. Executive Summary ──────────────────────────────────────────
-        st.markdown("#### 1. Executive Summary")
-        st.markdown(report.get("executive_summary", ""))
-        st.markdown("---")
+        _rpt_section("01", "Executive Summary", "📋", "#6366F1")
+        st.markdown(
+            f'<div style="background:rgba(99,102,241,0.07);border-left:3px solid #6366F1;'
+            f'border-radius:0 10px 10px 0;padding:1rem 1.25rem;margin-bottom:0.5rem;'
+            f'font-size:0.92rem;color:#CBD5E1;line-height:1.7">'
+            f'{report.get("executive_summary","").replace(chr(10),"<br>")}</div>',
+            unsafe_allow_html=True,
+        )
 
         # ── 2. Background Summary ─────────────────────────────────────────
-        st.markdown("#### 2. Background Summary")
+        _rpt_section("02", "Background Summary", "🏢", "#7C3AED")
         st.markdown(report.get("background_summary", ""))
-        st.markdown("---")
 
         # ── 3. Problem / Need Analysis ────────────────────────────────────
-        st.markdown("#### 3. Problem / Need Analysis")
+        _rpt_section("03", "Problem / Need Analysis", "🎯", "#F43F5E")
         pna = report.get("problem_need_analysis", [])
         if pna:
             df_pna = pd.DataFrame([
@@ -1500,10 +1537,8 @@ def render_report_section():
                              "Problem / Need": st.column_config.TextColumn("Problem / Need", width="medium"),
                              "Business Impact": st.column_config.TextColumn("Business Impact", width="large"),
                          })
-        st.markdown("---")
-
         # ── 4. Requirements Analysis ──────────────────────────────────────
-        st.markdown("#### 4. Requirements Analysis")
+        _rpt_section("04", "Requirements Analysis", "📝", "#0EA5E9")
         tab_fr, tab_nfr, tab_con, tab_goals, tab_tech = st.tabs([
             "Functional", "Non-Functional", "Constraints", "Business Goals", "Tech Context"
         ])
@@ -1562,18 +1597,14 @@ def render_report_section():
             else:
                 st.info("No technology context.")
 
-        st.markdown("---")
-
         # ── 5. Assumptions ────────────────────────────────────────────────
-        st.markdown("#### 5. Assumptions")
+        _rpt_section("05", "Assumptions", "💡", "#F59E0B")
         assumptions = report.get("assumptions", [])
         if assumptions:
             df_ass = pd.DataFrame([{"Assumption": a} for a in assumptions])
             st.dataframe(df_ass, use_container_width=True, hide_index=True)
-        st.markdown("---")
-
         # ── 6. Feature & Module Breakdown ─────────────────────────────────
-        st.markdown("#### 6. Feature & Module Breakdown")
+        _rpt_section("06", "Feature & Module Breakdown", "🧩", "#10B981")
         fmb = report.get("feature_module_breakdown", [])
         if fmb:
             df_fmb = pd.DataFrame([
@@ -1590,10 +1621,8 @@ def render_report_section():
                              "Feature / Functionality": st.column_config.TextColumn("Feature / Functionality", width="large"),
                              "Technologies Used": st.column_config.TextColumn("Technologies Used", width="medium"),
                          })
-        st.markdown("---")
-
         # ── 7. Final Solution Architecture ────────────────────────────────
-        st.markdown("#### 7. Final Solution Architecture")
+        _rpt_section("07", "Solution Architecture", "🗺️", "#6366F1")
         if mermaid:
             with st.expander("📊 View Architecture Diagram", expanded=True):
                 render_mermaid_diagram(mermaid)
@@ -1601,10 +1630,8 @@ def render_report_section():
                 st.code(mermaid, language="mermaid")
         else:
             st.info("Architecture diagram not available.")
-        st.markdown("---")
-
         # ── 8. Feasibility Assessment ─────────────────────────────────────
-        st.markdown("#### 8. Feasibility Assessment")
+        _rpt_section("08", "Feasibility Assessment", "🔍", "#8B5CF6")
         ft = report.get("feasibility_table", [])
         if ft:
             df_ft = pd.DataFrame([
@@ -1617,10 +1644,8 @@ def render_report_section():
                              "Value": st.column_config.TextColumn("Value", width="small"),
                              "Reason": st.column_config.TextColumn("Reason", width="large"),
                          })
-        st.markdown("---")
-
         # ── 9. Risk Assessment ────────────────────────────────────────────
-        st.markdown("#### 9. Risk Assessment")
+        _rpt_section("09", "Risk Assessment", "⚠️", "#F43F5E")
         ra = report.get("risk_assessment", [])
         if ra:
             df_ra = pd.DataFrame([
@@ -1637,26 +1662,13 @@ def render_report_section():
                              "Impact": st.column_config.TextColumn("Impact", width="small"),
                              "Mitigation Strategy": st.column_config.TextColumn("Mitigation Strategy", width="large"),
                          })
-        st.markdown("---")
-
         # ── 10. Recommendations & Next Steps ──────────────────────────────
-        st.markdown("#### 10. Recommendations & Next Steps")
+        _rpt_section("10", "Recommendations & Next Steps", "🚀", "#10B981")
         st.markdown(report.get("recommendations_next_steps", ""))
-        st.markdown("---")
 
         # ── 11. Architecture Summary ───────────────────────────────────────
-        st.markdown("#### 11. Architecture Summary")
+        _rpt_section("11", "Architecture Summary", "📐", "#0EA5E9")
         st.markdown(report.get("architecture_summary", ""))
-        st.markdown("---")
-
-        # ── 12. Final Solution Architecture (repeated) ────────────────────
-        st.markdown("#### 12. Final Solution Architecture")
-        if mermaid:
-            with st.expander("📊 View Architecture Diagram", expanded=False):
-                render_mermaid_diagram(mermaid)
-        else:
-            st.info("Architecture diagram not available.")
-        st.markdown("---")
 
         # ── Effort Estimation Details ─────────────────────────────────────
         if est_data:
@@ -1956,22 +1968,13 @@ def render_dashboard():
         )
     with _hdr_right:
         _ct = st.session_state.get("app_theme", "dark")
-        _th_info = {"dark": ("🌙", "Light", "light"), "light": ("☀️", "System", "system"), "system": ("💻", "Dark", "dark")}
-        _icon, _next_label, _next = _th_info[_ct]
+        _cycle  = {"dark": "light", "light": "system", "system": "dark"}
+        _icons  = {"dark": "🌙", "light": "☀️", "system": "💻"}
+        _labels = {"dark": "Dark — click for Light", "light": "Light — click for System", "system": "System — click for Dark"}
         st.markdown('<div style="padding-top:0.4rem"></div>', unsafe_allow_html=True)
-        _tc1, _tc2, _tc3 = st.columns(3)
-        with _tc1:
-            if st.button("🌙", key="th_dark", help="Dark",
-                         type="primary" if _ct == "dark" else "secondary", use_container_width=True):
-                st.session_state.app_theme = "dark"; st.rerun()
-        with _tc2:
-            if st.button("☀️", key="th_light", help="Light",
-                         type="primary" if _ct == "light" else "secondary", use_container_width=True):
-                st.session_state.app_theme = "light"; st.rerun()
-        with _tc3:
-            if st.button("💻", key="th_sys", help="System",
-                         type="primary" if _ct == "system" else "secondary", use_container_width=True):
-                st.session_state.app_theme = "system"; st.rerun()
+        if st.button(_icons[_ct], key="th_toggle", help=_labels[_ct], use_container_width=True):
+            st.session_state.app_theme = _cycle[_ct]
+            st.rerun()
 
     if not st.session_state.selected_project:
         st.markdown('<div class="accent-bar"></div>', unsafe_allow_html=True)
@@ -2076,19 +2079,23 @@ def render_dashboard():
         st.markdown("---")
         st.info("📌 Upload and save a transcript above to enable the Task Agent.")
 
-    # ── Step 3: Planning Agent ─────────────────────────────────
+    # ── Steps 3+4: Planning + Feasibility ─────────────────────
+    # When both have been auto-run via HITL #1, show as compact expanders so
+    # HITL #2 appears immediately below without requiring extra clicks.
     if st.session_state.approved_requirements:
-        render_planning_agent_section()
+        if st.session_state.plan_output and st.session_state.feasibility_output:
+            with st.expander("🏗️ Planning Agent Results — click to view or re-run", expanded=False):
+                render_planning_agent_section()
+            with st.expander("🔍 Feasibility Agent Results — click to view or re-run", expanded=False):
+                render_feasibility_section()
+        elif st.session_state.plan_output:
+            render_planning_agent_section()
+            render_feasibility_section()
+        else:
+            render_planning_agent_section()
     elif existing_transcript.strip() and st.session_state.task_output:
         st.markdown("---")
         st.info("📌 Approve the extracted requirements above to enable the Planning Agent.")
-
-    # ── Step 4: Feasibility Agent ─────────────────────────────
-    if st.session_state.plan_output:
-        render_feasibility_section()
-    elif st.session_state.approved_requirements:
-        st.markdown("---")
-        st.info("📌 Run the Planning Agent above to enable the Feasibility Study.")
 
     # ── Step 4b: HITL #2 — Approve Plan + Feasibility ─────────
     if st.session_state.plan_output and st.session_state.feasibility_output:

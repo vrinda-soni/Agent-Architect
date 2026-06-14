@@ -14,7 +14,15 @@ TIMEOUT = 600  # 10 min — report agent can be slow with large inputs
 
 def _post(path: str, payload: dict) -> dict:
     resp = requests.post(f"{API_URL}{path}", json=payload, timeout=TIMEOUT)
-    resp.raise_for_status()
+    if not resp.ok:
+        try:
+            detail = resp.json().get("detail", resp.text[:1000])
+        except Exception:
+            detail = resp.text[:1000]
+        raise requests.exceptions.HTTPError(
+            f"HTTP {resp.status_code} from {path}: {detail}",
+            response=resp,
+        )
     return resp.json()
 
 

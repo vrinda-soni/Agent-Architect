@@ -130,12 +130,21 @@ Only include columns that actually have work in this project.
 {mvp_section}
 
 ══════════════════════════════════════════════════
-STEP 3 — SCOPE CHECK
+STEP 3 — SCOPE CHECK & MINIMUM ROWS
 ══════════════════════════════════════════════════
 
 - Client asked for specific features only? → scope rows to exactly those.
-- Client asked for a complete system? → cover all layers.
-- Always include: Project Setup row, Auth module (if users exist), QA module.
+- Client asked for a complete system? → cover ALL layers end-to-end.
+- Always include: Project Setup row, Auth module (if users exist), QA/Testing module, Deployment/DevOps row.
+
+MINIMUM ROW REQUIREMENT (NON-NEGOTIABLE):
+  - Small project  (≤5 requirements)  → at least 15 rows
+  - Medium project (6-12 requirements) → at least 25 rows
+  - Large project  (13+ requirements)  → at least 35 rows
+
+If you are about to produce fewer rows than the minimum, you MUST break existing rows into
+smaller, more specific sub-rows. Every feature group should have at least 2-3 rows inside it.
+A row should represent one concrete, assignable unit of work — not an entire module.
 
 ══════════════════════════════════════════════════
 STEP 4 — BUILD ROWS
@@ -161,8 +170,15 @@ Format:
 BAD: "Build voice session initialization"
 GOOD: "Associate launches roleplay session with microphone permissions, briefing, and objectives. Sub-tasks: (1) Browser mic permission request + fallback handling, (2) Pre-session briefing screen showing scenario + difficulty, (3) Session init API — create record, assign persona, return session token"
 
-Every Medium / High / Very High complexity row MUST have at least 2 sub-tasks.
-Low complexity rows: single atomic description is fine.
+MANDATORY SUB-TASK RULES:
+  - Low complexity       → at least 1 concrete deliverable described
+  - Medium complexity    → at least 3 numbered sub-tasks
+  - Medium-High          → at least 4 numbered sub-tasks
+  - High complexity      → at least 5 numbered sub-tasks
+  - Very High complexity → at least 6 numbered sub-tasks
+
+Each sub-task must be a real, assignable engineering deliverable — not a vague description.
+If you cannot think of enough sub-tasks, split the row into two separate rows instead.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMPLEXITY VALUES
@@ -194,19 +210,22 @@ Benchmarks:
   UAT + bug fixes: 12–20 hrs
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REMARKS — TECH TEAM (tech_remarks)
+REMARKS — TECH TEAM (tech_remarks)  [PRE-FILLED BY AI — STATIC ASSUMPTIONS]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Write technical notes, assumptions, dependencies, risks. Examples:
-  "Depends on streaming pipeline; cannot start until that is live"
-  "Assumes Whisper via API; self-hosted adds ~20 hrs"
-  "Critical path — all AI features blocked until this ships"
+Every row MUST have a non-empty tech_remarks. This is the tech lead's pre-filled note to the team.
+Write ONE of these (whichever is most relevant):
+  a) Dependency / blocking condition:   "Depends on X; cannot start until Y is done"
+  b) Technical assumption:              "Assumes Z via managed service; self-hosted would add ~N hrs"
+  c) Risk or complexity note:           "Latency risk with third-party API; add buffer if SLA < 200ms"
+  d) Critical path marker:              "Critical path — all downstream features blocked until this ships"
+  e) Tech decision summary:             "Uses JWT refresh tokens; stateless auth — no session store needed"
 
-If no special notes: write a brief technical decision summary.
+Never leave tech_remarks blank. If a row is simple, write the tech assumption that was made.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REMARKS — BA TEAM (ba_remarks)
+REMARKS — BA TEAM (ba_remarks)  [ALWAYS EMPTY — BA FILLS POST-HANDOFF]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALWAYS output exactly "". BA fills this manually. Never put anything here.
+ALWAYS output exactly "". This column is intentionally blank — the BA team fills it after handoff. Never put anything here.
 
 ══════════════════════════════════════════════════
 STEP 5 — VERIFY BEFORE OUTPUT
@@ -215,10 +234,12 @@ STEP 5 — VERIFY BEFORE OUTPUT
   ☐ structural_columns and tech_stack_columns match what is actually used in the rows
   ☐ Every row has ALL structural column keys (using exact same strings as in structural_columns)
   ☐ Every row's tech_hours uses EXACT same keys as tech_stack_columns
-  ☐ Every Medium/High/Very High row has sub-tasks in the description column
+  ☐ Row count meets the minimum for this project size (15 / 25 / 35+)
+  ☐ Every Medium/High/Very High row has the required number of sub-tasks
+  ☐ Every row has a non-empty tech_remarks (assumption, dependency, or tech decision)
   ☐ total_hours = exact sum of ALL tech_hours values across ALL rows
   ☐ tech_breakdown[col] = sum of that column across all rows
-  ☐ ba_remarks = "" in every single row
+  ☐ ba_remarks = "" in every single row — no exceptions
 
 ══════════════════════════════════════════════════
 OUTPUT FORMAT — valid JSON only, nothing else

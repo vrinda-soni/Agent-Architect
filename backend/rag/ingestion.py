@@ -24,10 +24,22 @@ def extract_text(file_bytes: bytes, file_type: str) -> str:
         import PyPDF2
         reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
         return "\n".join(page.extract_text() or "" for page in reader.pages)
-    elif file_type in ("docx", "doc"):
+    elif file_type == "docx":
         import docx
         doc = docx.Document(io.BytesIO(file_bytes))
         return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    elif file_type == "doc":
+        # .doc is old binary Word format — try python-docx first, fall back to text extraction
+        try:
+            import docx
+            doc = docx.Document(io.BytesIO(file_bytes))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception:
+            # Binary extraction: pull printable ASCII sequences (crude but works for most .doc files)
+            import re
+            raw = file_bytes.decode("latin-1", errors="ignore")
+            chunks = re.findall(r'[\x20-\x7e\n\r\t]{4,}', raw)
+            return "\n".join(line.strip() for line in chunks if line.strip())
     else:
         return file_bytes.decode("utf-8", errors="ignore")
 

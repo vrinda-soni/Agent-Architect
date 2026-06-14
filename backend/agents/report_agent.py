@@ -118,8 +118,9 @@ def run_report_agent(requirements: dict, plan: dict, feasibility: dict, estimati
     Compiles a 12-section consulting report from all approved agent outputs.
     Preserves all architectural decisions, feasibility values, and estimation numbers exactly.
     """
-    if not all([requirements, plan, feasibility, estimation]):
-        raise ValueError("Requirements, Plan, Feasibility, and Estimation are all required for the Report Agent.")
+    missing = [name for name, val in [("requirements", requirements), ("plan", plan), ("feasibility", feasibility), ("estimation", estimation)] if val is None]
+    if missing:
+        raise ValueError(f"Missing required inputs for Report Agent: {', '.join(missing)}")
 
     def _truncate(obj, max_chars=3000):
         s = json.dumps(obj, indent=2)
