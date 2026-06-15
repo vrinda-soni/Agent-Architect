@@ -20,9 +20,10 @@ from backend.api.client import (
     call_task_agent,
     call_planning_agent,
     call_feasibility_agent,
-    call_estimation_agent,
     call_report_agent,
 )
+from backend.agents.estimation_agent import run_estimation_agent
+from backend.rag.retrival import retrieve_context as _retrieve_context, format_context_for_prompt as _format_context
 from backend.report_generator import generate_docx, generate_pdf, generate_json, generate_markdown
 from backend.rag.ingestion import ingest_document, list_project_documents, extract_text
 from backend.rag.retrival import retrieve_context, format_context_for_prompt
@@ -296,13 +297,54 @@ async def _qa_answer(s: dict, question: str) -> None:
         await cl.Message(content="❌ No project selected — cannot search project documents.").send()
         return
 
-    # Retrieve relevant chunks
+    # Detect language and translate query to English for retrieval
+    lang_prompt = f"""Detect the language of this text and if it is not English, translate it to English.
+Return a JSON object with two keys: "language" (the detected language name in English, e.g. "Hindi", "English", "Spanish") and "english_query" (the English translation, or the original if already English).
+Text: {question}
+Return only valid JSON, no markdown."""
+    try:
+        lang_raw = await asyncio.to_thread(partial(generate_with_fallback, lang_prompt, agent_name="lang_detect"))
+        import json as _json
+        lang_data = _json.loads(lang_raw.strip().strip("```json").strip("```").strip())
+        detected_language = lang_data.get("language", "English")
+        search_query = lang_data.get("english_query", question)
+    except Exception:
+        detected_language = "English"
+        search_query = question
+
+    # Generate multiple search angles to handle paraphrased/conceptually similar questions
+    expand_prompt = f"""Generate 3 different search queries to retrieve relevant information for this question from a software project document.
+Each query should approach the topic from a different angle (direct, conceptual, keyword-focused).
+Return only a JSON array of 3 strings. No explanation, no markdown.
+Question: {search_query}"""
+    try:
+        expand_raw = await asyncio.to_thread(partial(generate_with_fallback, expand_prompt, agent_name="query_expander"))
+        import json as _json2
+        extra_queries = _json2.loads(expand_raw.strip().strip("```json").strip("```").strip())
+        if not isinstance(extra_queries, list):
+            extra_queries = []
+    except Exception:
+        extra_queries = []
+    all_queries = [search_query] + extra_queries[:2]  # original + 2 extras
+
+    # Retrieve relevant chunks using all query angles, deduplicate by chunk id
     async with cl.Step(name="Searching Documents", type="retrieval") as step:
-        step.input = question
+        step.input = search_query
         try:
-            chunks = await asyncio.to_thread(partial(retrieve_context, project_id, question, 5))
+            seen_ids: set = set()
+            merged_chunks: list = []
+            for q in all_queries:
+                results = await asyncio.to_thread(partial(retrieve_context, project_id, q, 6))
+                for c in results:
+                    cid = c.get("id") or c.get("chunk_text", "")[:80]
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        merged_chunks.append(c)
+            # Sort by similarity descending (best first), keep top 10
+            merged_chunks.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+            chunks = merged_chunks[:10]
             context = format_context_for_prompt(chunks)
-            step.output = f"Found {len(chunks)} relevant chunk(s)"
+            step.output = f"Found {len(chunks)} unique chunk(s) across {len(all_queries)} search angles"
         except Exception as e:
             chunks = []
             context = ""
@@ -319,7 +361,14 @@ async def _qa_answer(s: dict, question: str) -> None:
         lines.append("[END OF HISTORY]")
         history_block = "\n".join(lines)
 
+    lang_instruction = (
+        f"IMPORTANT: The user asked in {detected_language}. You MUST respond in {detected_language}."
+        if detected_language.lower() != "english"
+        else ""
+    )
+
     prompt = f"""You are an AI assistant answering questions about a software project analysis for "{proj_name}".
+{lang_instruction}
 
 {context if context else "(No indexed documents found — answer from general knowledge.)"}
 
@@ -327,7 +376,7 @@ async def _qa_answer(s: dict, question: str) -> None:
 
 Current question: {question}
 
-Answer concisely and accurately, taking the conversation history into account for any follow-up references. Reference specific sections from the documents when possible. If the answer is not in the documents, say so clearly."""
+Answer concisely and accurately, taking the conversation history into account for any follow-up references. Reference specific sections from the documents when possible. If the answer is not in the documents, say so clearly. {lang_instruction}"""
 
     async with cl.Step(name="Generating Answer", type="llm") as step:
         step.input = question
@@ -1416,17 +1465,25 @@ async def on_run_estimation(action: cl.Action):
     pid     = (s["selected_project"] or {}).get("id")
     inc_mvp = s.get("include_mvp", False)
 
+    rag_context = ""
+    if pid:
+        try:
+            chunks = await asyncio.to_thread(partial(_retrieve_context, pid, "effort estimation work breakdown structure", 5))
+            rag_context = _format_context(chunks)
+        except Exception:
+            pass
+
     async with cl.Step(name="Estimation Agent", type="tool") as step:
         step.input = "Generating Work Breakdown Structure & effort estimates..."
         try:
             result = await asyncio.to_thread(partial(
-                call_estimation_agent,
+                run_estimation_agent,
                 s["approved_requirements"],
                 s["plan_output"].model_dump(),
                 s["feasibility_output"].model_dump(),
-                project_id=pid,
                 transcript=s.get("current_transcript", ""),
                 include_mvp=inc_mvp,
+                rag_context=rag_context,
             ))
             s["estimation_output"] = result
             s["approved_estimation"] = s["report_output"] = None
