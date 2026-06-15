@@ -5,17 +5,19 @@ root_dir = Path(__file__).resolve().parent.parent.parent
 if str(root_dir) not in sys.path:
     sys.path.append(str(root_dir))
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["30/minute"])
 app = FastAPI(title="Agent Architect API", version="1.0.0")
-
-# ... existing code ...
-
-app = FastAPI(title="Agent Architect API", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,7 +86,8 @@ def _is_quota_error(error_msg: str) -> bool:
 # ── Agent endpoints ───────────────────────────────────────────────
 
 @app.post("/api/task-agent")
-def task_agent(req: TaskAgentRequest):
+@limiter.limit("10/minute")
+def task_agent(request: Request, req: TaskAgentRequest):
     from backend.agents.task_agent import run_task_agent
     try:
         result = run_task_agent(req.transcript, feedback=req.feedback or "")
@@ -98,7 +101,8 @@ def task_agent(req: TaskAgentRequest):
 
 
 @app.post("/api/planning-agent")
-def planning_agent(req: PlanningAgentRequest):
+@limiter.limit("10/minute")
+def planning_agent(request: Request, req: PlanningAgentRequest):
     from backend.agents.planning_agent import run_planning_agent
     try:
         rag_context = _build_rag_context(req.project_id, req.requirements)
@@ -113,7 +117,8 @@ def planning_agent(req: PlanningAgentRequest):
 
 
 @app.post("/api/feasibility-agent")
-def feasibility_agent(req: FeasibilityAgentRequest):
+@limiter.limit("10/minute")
+def feasibility_agent(request: Request, req: FeasibilityAgentRequest):
     from backend.agents.feasibility_agent import run_feasibility_agent
     try:
         result = run_feasibility_agent(req.requirements, req.plan, feedback=req.feedback or "")
@@ -127,7 +132,8 @@ def feasibility_agent(req: FeasibilityAgentRequest):
 
 
 @app.post("/api/estimation-agent")
-def estimation_agent(req: EstimationAgentRequest):
+@limiter.limit("10/minute")
+def estimation_agent(request: Request, req: EstimationAgentRequest):
     from backend.agents.estimation_agent import run_estimation_agent
     try:
         rag_context = _build_rag_context(req.project_id, req.requirements)
@@ -148,7 +154,8 @@ def estimation_agent(req: EstimationAgentRequest):
 
 
 @app.post("/api/report-agent")
-def report_agent(req: ReportAgentRequest):
+@limiter.limit("5/minute")
+def report_agent(request: Request, req: ReportAgentRequest):
     from backend.agents.report_agent import run_report_agent
     try:
         result = run_report_agent(req.requirements, req.plan, req.feasibility, req.estimation)
@@ -164,7 +171,8 @@ def report_agent(req: ReportAgentRequest):
 # ── RAG endpoints ─────────────────────────────────────────────────
 
 @app.post("/api/rag/{project_id}/ingest")
-async def ingest(project_id: str, file: UploadFile = File(...)):
+@limiter.limit("5/minute")
+async def ingest(request: Request, project_id: str, file: UploadFile = File(...)):
     from backend.rag.ingestion import ingest_document
     try:
         file_bytes = await file.read()

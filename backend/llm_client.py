@@ -59,7 +59,7 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 # -----------------------------------------------------------------
 # OpenRouter call
 # -----------------------------------------------------------------
-def _call_openrouter(prompt: str, model: str, generation=None) -> str:
+def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int = None) -> str:
     """Call OpenRouter with a specific model."""
     if not OPENROUTER_API_KEY:
         raise ValueError(
@@ -76,6 +76,8 @@ def _call_openrouter(prompt: str, model: str, generation=None) -> str:
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
 
     start = time.time()
     resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=300)
@@ -110,7 +112,7 @@ def _call_openrouter(prompt: str, model: str, generation=None) -> str:
 # -----------------------------------------------------------------
 # Gemini call
 # -----------------------------------------------------------------
-def _call_gemini(prompt: str, use_search: bool = False, generation=None) -> str:
+def _call_gemini(prompt: str, use_search: bool = False, generation=None, max_tokens: int = None) -> str:
     """Call Gemini with optional Google Search grounding."""
     if not _gemini_client or not GEMINI_API_KEY:
         raise ValueError("Gemini API key is not set.")
@@ -118,6 +120,8 @@ def _call_gemini(prompt: str, use_search: bool = False, generation=None) -> str:
     config = types.GenerateContentConfig()
     if use_search:
         config.tools = [{"google_search": {}}]
+    if max_tokens:
+        config.max_output_tokens = max_tokens
 
     start = time.time()
     response = _gemini_client.models.generate_content(
@@ -150,11 +154,16 @@ def _call_gemini(prompt: str, use_search: bool = False, generation=None) -> str:
 # -----------------------------------------------------------------
 # Public API: generate with fallback + Langfuse tracing
 # -----------------------------------------------------------------
+# Per-agent output token limits — balances quality vs cost
+_AGENT_MAX_TOKENS = {}  # no output token caps — let the model respond fully
+
+
 def generate_with_fallback(
     prompt: str,
     use_search: bool = False,
     trace=None,
     agent_name: str = "llm_call",
+    max_tokens: int = None,
 ) -> str:
     """
     Generate text using Gemini first. If quota/rate-limit is hit,
@@ -172,6 +181,9 @@ def generate_with_fallback(
     """
     from backend.langfuse_client import create_trace, flush
 
+    # Resolve token limit: explicit arg > per-agent default > None (no cap)
+    token_limit = max_tokens or _AGENT_MAX_TOKENS.get(agent_name)
+
     # Use provided trace or create a standalone one
     active_trace = trace or create_trace(name=agent_name, metadata={"prompt_len": len(prompt)})
 
@@ -183,9 +195,9 @@ def generate_with_fallback(
                 name=f"{agent_name}:gemini",
                 model=GEMINI_MODEL,
                 input=prompt,
-                metadata={"provider": "gemini"},
+                metadata={"provider": "gemini", "max_tokens": token_limit},
             )
-            result = _call_gemini(prompt, use_search=use_search, generation=gen)
+            result = _call_gemini(prompt, use_search=use_search, generation=gen, max_tokens=token_limit)
             if trace is None:
                 flush()
             return result
@@ -211,9 +223,9 @@ def generate_with_fallback(
                 name=f"{agent_name}:{model.split('/')[0]}",
                 model=model,
                 input=prompt,
-                metadata={"provider": "openrouter"},
+                metadata={"provider": "openrouter", "max_tokens": token_limit},
             )
-            result = _call_openrouter(prompt, model=model, generation=gen)
+            result = _call_openrouter(prompt, model=model, generation=gen, max_tokens=token_limit)
             if trace is None:
                 flush()
             return result

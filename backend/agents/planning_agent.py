@@ -67,14 +67,34 @@ Return your response as a valid JSON object with this EXACT structure:
             "url": "..."
         }}
     ],
-    "mermaid_diagram": "flowchart TD\\n    Users[End Users] --> Portal[Client Portal]\\n    Portal --> Platform[Core Platform]\\n    Platform --> AI[AI Services]\\n    Platform --> Data[(Data Store)]"
+    "mermaid_diagram": "",
+    "excalidraw_diagram": {{
+        "nodes": [
+            {{"id": "ui",       "label": "User Interface",  "type": "box",      "layer": 0}},
+            {{"id": "api",      "label": "Backend API",     "type": "box",      "layer": 1}},
+            {{"id": "ai",       "label": "AI Services",     "type": "box",      "layer": 2}},
+            {{"id": "db",       "label": "Database",        "type": "database", "layer": 2}},
+            {{"id": "ext",      "label": "External APIs",   "type": "box",      "layer": 3}}
+        ],
+        "edges": [
+            {{"from": "ui",  "to": "api", "label": "HTTP/REST"}},
+            {{"from": "api", "to": "ai",  "label": "invoke"}},
+            {{"from": "api", "to": "db",  "label": "query"}},
+            {{"from": "ai",  "to": "ext", "label": "call"}}
+        ]
+    }}
 }}
 
 Rules:
-- tech_stack categories are DYNAMIC — use whatever categories make sense for this project (e.g., "frontend", "backend", "database", "cloud", "ai_llm", "ci_cd", "monitoring", "message_queue", "cache", etc.). Do NOT force a fixed set of categories.
+- tech_stack categories are DYNAMIC — use whatever categories make sense for this project.
 - recommendation_reason keys MUST match tech_stack keys exactly.
-- reference_docs: Include real, valid documentation URLs relevant to the chosen stack. If the client uses Azure, include Azure docs. If they use AWS, include AWS docs.
-- mermaid_diagram: MUST be a valid, SIMPLE Mermaid flowchart using flowchart TD syntax. Use 5-8 BUSINESS-LEVEL component nodes only. No framework/library names in the diagram. Keep labels short (max 3 words). Each statement on its own line separated by newlines (\\n). Do NOT use semicolons.
+- reference_docs: Include real, valid documentation URLs relevant to the chosen stack.
+- mermaid_diagram: Leave as empty string "".
+- excalidraw_diagram: Generate a proper node/edge architecture diagram for THIS project.
+  - nodes: 5-10 BUSINESS-LEVEL components (not framework names). Each node needs: id (short slug), label (2-4 words), type (box/database/decision/circle), layer (0=leftmost/client, increasing towards right/external).
+  - edges: Connect nodes with directional relationships. Each edge needs: from, to, label (short action like "HTTP", "query", "invoke", "stream").
+  - Layer 0 = User/Client facing. Layer 1 = Gateway/API. Layer 2 = Core services. Layer 3 = Data/AI. Layer 4 = External.
+  - Keep it clean — 5-10 nodes max, meaningful connections only.
 - Do NOT include markdown blocks outside the JSON.
 - Respond with ONLY the JSON object, nothing else.
 

@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CHUNK_SIZE = 600
-CHUNK_OVERLAP = 100
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 150
 
 
 def _supabase():
@@ -48,17 +48,65 @@ def chunk_text(text: str) -> list[str]:
     text = text.strip()
     if not text:
         return []
+    return _recursive_split(text, CHUNK_SIZE, CHUNK_OVERLAP)
+
+
+def _recursive_split(text: str, chunk_size: int, overlap: int) -> list[str]:
+    # Try splitting on natural boundaries in order of preference
+    separators = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
+    return _split_with_separators(text, separators, chunk_size, overlap)
+
+
+def _split_with_separators(text: str, separators: list, chunk_size: int, overlap: int) -> list[str]:
+    if len(text) <= chunk_size:
+        return [text.strip()] if text.strip() else []
+
+    sep = separators[0]
+    remaining_seps = separators[1:]
+
+    if sep == "":
+        # Last resort: pure character split
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= len(text):
+                break
+            start = end - overlap
+        return chunks
+
+    parts = text.split(sep)
     chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + CHUNK_SIZE, len(text))
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end >= len(text):
-            break
-        start = end - CHUNK_OVERLAP
-    return chunks
+    current = ""
+
+    for part in parts:
+        candidate = (current + sep + part).lstrip(sep) if current else part
+        if len(candidate) <= chunk_size:
+            current = candidate
+        else:
+            if current.strip():
+                if len(current) > chunk_size and remaining_seps:
+                    # current piece itself is too big — recurse with next separator
+                    chunks.extend(_split_with_separators(current, remaining_seps, chunk_size, overlap))
+                else:
+                    chunks.append(current.strip())
+            current = part
+
+        # Carry overlap from last chunk into next
+        if chunks and not current:
+            last = chunks[-1]
+            current = last[-overlap:].lstrip() if len(last) > overlap else ""
+
+    if current.strip():
+        if len(current) > chunk_size and remaining_seps:
+            chunks.extend(_split_with_separators(current, remaining_seps, chunk_size, overlap))
+        else:
+            chunks.append(current.strip())
+
+    return [c for c in chunks if c]
 
 
 def _embed_gemini(text: str) -> list[float]:

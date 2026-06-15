@@ -5,8 +5,10 @@ Generates downloadable report files (DOCX, PDF, JSON, Markdown) from the
 12-section consulting report produced by the Report Agent.
 """
 
+import base64
 import io
 import json
+import urllib.request
 from datetime import datetime
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -14,6 +16,41 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from fpdf import FPDF
+
+# Professional navy palette
+_NAVY       = "1E3A5F"          # header fill
+_NAVY_RGB   = RGBColor(30, 58, 95)
+_ROW_ALT    = (232, 240, 254)   # alternating row tint (light blue-grey)
+
+
+# ── Mermaid → PNG via mermaid.ink ────────────────────────────────────────────
+
+def _get_diagram_png(plan_data: dict) -> bytes | None:
+    """Render architecture diagram to PNG — Excalidraw preferred, mermaid.ink fallback."""
+    # Try Excalidraw first
+    excalidraw_data = plan_data.get("excalidraw_diagram")
+    if excalidraw_data and excalidraw_data.get("nodes"):
+        try:
+            from backend.excalidraw_utils import build_excalidraw_json, excalidraw_to_png
+            scene = build_excalidraw_json(excalidraw_data)
+            png = excalidraw_to_png(scene)
+            if png:
+                return png
+        except Exception as e:
+            print(f"[Diagram] Excalidraw render failed: {e}")
+
+    # Fallback: mermaid.ink
+    mermaid = plan_data.get("mermaid_diagram", "")
+    if mermaid and mermaid.strip():
+        try:
+            encoded = base64.urlsafe_b64encode(mermaid.strip().encode()).decode()
+            url = f"https://mermaid.ink/img/{encoded}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return resp.read()
+        except Exception:
+            pass
+    return None
 
 
 # ── DOCX helpers ─────────────────────────────────────────────────────────────
@@ -30,7 +67,7 @@ def _shade_cell(cell, hex_color: str):
 
 
 def _add_table_docx(doc, headers: list, rows: list, col_widths: list = None):
-    """Add a styled table (purple header) to a DOCX document."""
+    """Add a styled table (navy header) to a DOCX document."""
     n_cols = len(headers)
     if n_cols == 0:
         return
@@ -51,7 +88,7 @@ def _add_table_docx(doc, headers: list, rows: list, col_widths: list = None):
         run.font.size = Pt(10)
         run.font.color.rgb = RGBColor(255, 255, 255)
         para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        _shade_cell(cell, "6622FF")
+        _shade_cell(cell, _NAVY)
 
     # Data rows
     for row_data in rows:
@@ -73,7 +110,7 @@ def _add_table_docx(doc, headers: list, rows: list, col_widths: list = None):
 def _section_heading_docx(doc, text: str, level: int = 1):
     h = doc.add_heading(text, level=level)
     if h.runs:
-        h.runs[0].font.color.rgb = RGBColor(50, 50, 50)
+        h.runs[0].font.color.rgb = RGBColor(30, 58, 95)
 
 
 # ── PDF helpers ───────────────────────────────────────────────────────────────
@@ -81,10 +118,10 @@ def _section_heading_docx(doc, text: str, level: int = 1):
 class ReportPDF(FPDF):
     def header(self):
         self.set_font("Helvetica", "B", 12)
-        self.set_text_color(102, 34, 255)
+        self.set_text_color(30, 58, 95)
         self.cell(0, 10, "AI-Powered POC Generator - Project Report", new_x="LMARGIN", new_y="NEXT", align="C")
         self.ln(1)
-        self.set_draw_color(102, 34, 255)
+        self.set_draw_color(30, 58, 95)
         self.line(10, self.get_y(), 200, self.get_y())
         self.ln(4)
 
@@ -97,9 +134,9 @@ class ReportPDF(FPDF):
     def section_title(self, title: str):
         self.ln(4)
         self.set_font("Helvetica", "B", 12)
-        self.set_text_color(102, 34, 255)
+        self.set_text_color(30, 58, 95)
         self.cell(0, 8, _safe(title), new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(200, 190, 255)
+        self.set_draw_color(30, 58, 95)
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(3)
 
@@ -120,7 +157,7 @@ class ReportPDF(FPDF):
         self.ln(2)
 
     def simple_table(self, headers: list, rows: list, col_widths: list = None):
-        """Draw a table with a purple header and alternating row shading."""
+        """Draw a table with a navy header and alternating row shading."""
         if not headers:
             return
         usable = self.w - self.l_margin - self.r_margin
@@ -128,12 +165,11 @@ class ReportPDF(FPDF):
             col_widths = [usable / len(headers)] * len(headers)
         row_h = 7
 
-        # Check if we need a page break before the table
         if self.get_y() > self.h - 40:
             self.add_page()
 
         # Header
-        self.set_fill_color(102, 34, 255)
+        self.set_fill_color(30, 58, 95)
         self.set_text_color(255, 255, 255)
         self.set_font("Helvetica", "B", 9)
         for h, w in zip(headers, col_widths):
@@ -145,8 +181,7 @@ class ReportPDF(FPDF):
         for idx, row_data in enumerate(rows):
             if self.get_y() > self.h - 20:
                 self.add_page()
-                # Redraw header after page break
-                self.set_fill_color(102, 34, 255)
+                self.set_fill_color(30, 58, 95)
                 self.set_text_color(255, 255, 255)
                 self.set_font("Helvetica", "B", 9)
                 for h, w in zip(headers, col_widths):
@@ -155,7 +190,10 @@ class ReportPDF(FPDF):
                 self.set_font("Helvetica", "", 9)
 
             fill = idx % 2 == 0
-            self.set_fill_color(240, 238, 255) if fill else self.set_fill_color(255, 255, 255)
+            if fill:
+                self.set_fill_color(*_ROW_ALT)
+            else:
+                self.set_fill_color(255, 255, 255)
             self.set_text_color(40, 40, 40)
             for cell_text, w in zip(row_data, col_widths):
                 safe = _safe(str(cell_text) if cell_text else "")
@@ -193,16 +231,17 @@ def _md_list_table(header: str, items: list) -> str:
 # ── Public generator functions ────────────────────────────────────────────────
 
 def generate_docx(report_data: dict) -> io.BytesIO:
-    """Generate a Word (.docx) report following the 12-section consulting format."""
+    """Generate a Word (.docx) report following the 11-section consulting format."""
     doc = Document()
     raw = report_data.get("raw_data", {})
     plan_data = raw.get("plan", {})
+    mermaid = plan_data.get("mermaid_diagram", "")
 
     # Title page
     title = doc.add_heading("Project Consulting Report", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     if title.runs:
-        title.runs[0].font.color.rgb = RGBColor(102, 34, 255)
+        title.runs[0].font.color.rgb = _NAVY_RGB
         title.runs[0].font.size = Pt(22)
 
     sub = doc.add_paragraph()
@@ -270,17 +309,14 @@ def generate_docx(report_data: dict) -> io.BytesIO:
     _add_table_docx(doc, ["Module", "Feature / Functionality", "Technologies Used"], rows,
                     col_widths=[Inches(1.5), Inches(2.8), Inches(2.3)])
 
-    # 7. Final Solution Architecture
-    _section_heading_docx(doc, "7. Final Solution Architecture")
-    mermaid = plan_data.get("mermaid_diagram", "")
-    if mermaid:
-        doc.add_paragraph("Architecture diagram source (render at mermaid.live):")
-        p = doc.add_paragraph(mermaid)
-        if p.runs:
-            p.runs[0].font.name = "Courier New"
-            p.runs[0].font.size = Pt(8)
+    # 7. Solution Architecture
+    _section_heading_docx(doc, "7. Solution Architecture")
+    png_bytes = _get_diagram_png(plan_data)
+    if png_bytes:
+            doc.add_paragraph("Architecture Diagram:")
+            doc.add_picture(io.BytesIO(png_bytes), width=Inches(6.0))
     else:
-        doc.add_paragraph("Architecture diagram not available.")
+        doc.add_paragraph("Architecture diagram could not be rendered.")
     doc.add_paragraph()
 
     # 8. Feasibility Assessment
@@ -311,17 +347,6 @@ def generate_docx(report_data: dict) -> io.BytesIO:
     doc.add_paragraph(report_data.get("architecture_summary", ""))
     doc.add_paragraph()
 
-    # 12. Final Solution Architecture (repeated)
-    _section_heading_docx(doc, "12. Final Solution Architecture")
-    if mermaid:
-        doc.add_paragraph("Architecture diagram source (render at mermaid.live):")
-        p = doc.add_paragraph(mermaid)
-        if p.runs:
-            p.runs[0].font.name = "Courier New"
-            p.runs[0].font.size = Pt(8)
-    else:
-        doc.add_paragraph("Architecture diagram not available.")
-
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
@@ -329,129 +354,121 @@ def generate_docx(report_data: dict) -> io.BytesIO:
 
 
 def generate_pdf(report_data: dict) -> io.BytesIO:
-    """Generate a PDF report following the 12-section consulting format."""
-    pdf = ReportPDF()
-    pdf.add_page()
+    """Generate PDF by converting Markdown → HTML → PDF (proper layout, no overlap)."""
+    import base64
+    import markdown as md_lib
+    from weasyprint import HTML, CSS
+
     raw = report_data.get("raw_data", {})
     plan_data = raw.get("plan", {})
 
-    # Title
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.set_text_color(102, 34, 255)
-    pdf.cell(0, 12, "Project Consulting Report", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(128, 128, 128)
-    pdf.cell(0, 6, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
-    pdf.ln(8)
+    # Render architecture diagram to PNG first (Excalidraw preferred)
+    diagram_png = _get_diagram_png(plan_data)
 
-    # 1. Executive Summary
-    pdf.section_title("1. Executive Summary")
-    pdf.paragraph(report_data.get("executive_summary", ""))
+    # Get the markdown content
+    md_buf = generate_markdown(report_data)
+    md_text = md_buf.read().decode("utf-8")
 
-    # 2. Background Summary
-    pdf.section_title("2. Background Summary")
-    pdf.paragraph(report_data.get("background_summary", ""))
+    # Convert markdown to HTML
+    html_body = md_lib.markdown(md_text, extensions=["tables", "fenced_code", "nl2br"])
 
-    # 3. Problem / Need Analysis
-    pdf.section_title("3. Problem / Need Analysis")
-    rows = [
-        (r.get("problem_need", ""), r.get("business_impact", ""))
-        for r in report_data.get("problem_need_analysis", [])
-    ]
-    pdf.simple_table(["Problem / Need", "Business Impact"], rows, [95, 95])
+    # Inject diagram PNG (base64) into Section 7, replacing the placeholder
+    if diagram_png:
+        b64 = base64.b64encode(diagram_png).decode()
+        img_tag = (
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;height:auto;margin:12px 0;border:1px solid #CBD5E0;border-radius:4px;" />'
+        )
+        html_body = html_body.replace(
+            "<em>Architecture diagram not available.</em>",
+            img_tag,
+        )
 
-    # 4. Requirements Analysis
-    pdf.section_title("4. Requirements Analysis")
+    # Build full HTML with professional CSS
+    html_full = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {{
+    margin: 2cm 2.5cm;
+    @bottom-right {{ content: "Page " counter(page); font-size: 9pt; color: #666; }}
+  }}
+  body {{
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 10pt;
+    color: #1a1a2e;
+    line-height: 1.6;
+  }}
+  h1 {{
+    color: #1E3A5F;
+    font-size: 22pt;
+    text-align: center;
+    border-bottom: 3px solid #1E3A5F;
+    padding-bottom: 8px;
+    margin-bottom: 4px;
+  }}
+  h2 {{
+    color: #1E3A5F;
+    font-size: 14pt;
+    border-bottom: 1.5px solid #1E3A5F;
+    padding-bottom: 4px;
+    margin-top: 24px;
+    page-break-after: avoid;
+  }}
+  h3 {{
+    color: #2C5282;
+    font-size: 11pt;
+    margin-top: 16px;
+    page-break-after: avoid;
+  }}
+  p {{ margin: 6px 0 10px 0; }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 9pt;
+    page-break-inside: avoid;
+  }}
+  th {{
+    background-color: #1E3A5F;
+    color: #ffffff;
+    padding: 7px 10px;
+    text-align: left;
+    font-weight: bold;
+  }}
+  td {{
+    padding: 6px 10px;
+    border: 1px solid #CBD5E0;
+    vertical-align: top;
+    word-wrap: break-word;
+  }}
+  tr:nth-child(even) td {{ background-color: #E8F0FE; }}
+  tr:nth-child(odd) td  {{ background-color: #ffffff; }}
+  code, pre {{
+    font-family: "Courier New", monospace;
+    font-size: 8pt;
+    background: #F7FAFC;
+    border: 1px solid #E2E8F0;
+    border-radius: 3px;
+    padding: 2px 4px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }}
+  pre {{ padding: 10px; margin: 8px 0; }}
+  hr {{ border: none; border-top: 1px solid #CBD5E0; margin: 16px 0; }}
+  ul, ol {{ margin: 6px 0 10px 1.2em; padding: 0; }}
+  li {{ margin: 3px 0; }}
+  em {{ color: #718096; font-size: 9pt; }}
+</style>
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
 
-    pdf.subsection_title("Functional Requirements")
-    rows = [
-        (r.get("id", ""), r.get("requirement", ""))
-        for r in report_data.get("functional_requirements", [])
-    ]
-    pdf.simple_table(["ID", "Requirement"], rows, [25, 165])
-
-    pdf.subsection_title("Non-Functional Requirements")
-    rows = [
-        (r.get("category", ""), r.get("requirement", ""))
-        for r in report_data.get("non_functional_requirements", [])
-    ]
-    pdf.simple_table(["Category", "Requirement"], rows, [55, 135])
-
-    pdf.subsection_title("Constraints")
-    pdf.simple_table(["Constraint"], [[c] for c in report_data.get("constraints", [])], [190])
-
-    pdf.subsection_title("Business Goals")
-    pdf.simple_table(["Goal"], [[g] for g in report_data.get("business_goals", [])], [190])
-
-    pdf.subsection_title("Technology Context")
-    pdf.simple_table(["Technology Context"], [[t] for t in report_data.get("technology_context", [])], [190])
-
-    # 5. Assumptions
-    pdf.section_title("5. Assumptions")
-    pdf.simple_table(["Assumption"], [[a] for a in report_data.get("assumptions", [])], [190])
-
-    # 6. Feature & Module Breakdown
-    pdf.section_title("6. Feature & Module Breakdown")
-    rows = [
-        (r.get("module", ""), r.get("feature_functionality", ""), r.get("technologies_used", ""))
-        for r in report_data.get("feature_module_breakdown", [])
-    ]
-    pdf.simple_table(["Module", "Feature / Functionality", "Technologies Used"], rows, [45, 95, 50])
-
-    # 7. Final Solution Architecture
-    pdf.section_title("7. Final Solution Architecture")
-    mermaid = plan_data.get("mermaid_diagram", "")
-    if mermaid:
-        pdf.paragraph("Architecture diagram source (render at mermaid.live):")
-        pdf.set_font("Courier", "", 8)
-        pdf.set_text_color(40, 40, 40)
-        safe_mermaid = _safe(mermaid)
-        if len(safe_mermaid) > 2000:
-            safe_mermaid = safe_mermaid[:1997] + "..."
-        pdf.multi_cell(0, 5, safe_mermaid)
-        pdf.ln(2)
-    else:
-        pdf.paragraph("Architecture diagram not available.")
-
-    # 8. Feasibility Assessment
-    pdf.section_title("8. Feasibility Assessment")
-    rows = [
-        (r.get("metric", ""), r.get("value", ""), r.get("reason", ""))
-        for r in report_data.get("feasibility_table", [])
-    ]
-    pdf.simple_table(["Metric", "Value", "Reason"], rows, [55, 30, 105])
-
-    # 9. Risk Assessment
-    pdf.section_title("9. Risk Assessment")
-    rows = [
-        (r.get("risk", ""), r.get("impact", ""), r.get("mitigation_strategy", ""))
-        for r in report_data.get("risk_assessment", [])
-    ]
-    pdf.simple_table(["Risk", "Impact", "Mitigation Strategy"], rows, [65, 40, 85])
-
-    # 10. Recommendations & Next Steps
-    pdf.section_title("10. Recommendations & Next Steps")
-    pdf.paragraph(report_data.get("recommendations_next_steps", ""))
-
-    # 11. Architecture Summary
-    pdf.section_title("11. Architecture Summary")
-    pdf.paragraph(report_data.get("architecture_summary", ""))
-
-    # 12. Final Solution Architecture (repeated)
-    pdf.section_title("12. Final Solution Architecture")
-    if mermaid:
-        pdf.paragraph("Architecture diagram source (render at mermaid.live):")
-        pdf.set_font("Courier", "", 8)
-        pdf.set_text_color(40, 40, 40)
-        safe_mermaid = _safe(mermaid)
-        if len(safe_mermaid) > 2000:
-            safe_mermaid = safe_mermaid[:1997] + "..."
-        pdf.multi_cell(0, 5, safe_mermaid)
-    else:
-        pdf.paragraph("Architecture diagram not available.")
-
-    buffer = io.BytesIO(pdf.output())
-    return buffer
+    pdf_bytes = HTML(string=html_full).write_pdf()
+    return io.BytesIO(pdf_bytes)
 
 
 def generate_json(report_data: dict) -> io.BytesIO:
@@ -463,7 +480,7 @@ def generate_json(report_data: dict) -> io.BytesIO:
 
 
 def generate_markdown(report_data: dict) -> io.BytesIO:
-    """Generate a Markdown report following the 12-section consulting format."""
+    """Generate a Markdown report following the 11-section consulting format."""
     raw = report_data.get("raw_data", {})
     plan_data = raw.get("plan", {})
     mermaid = plan_data.get("mermaid_diagram", "")
@@ -547,7 +564,7 @@ def generate_markdown(report_data: dict) -> io.BytesIO:
     lines += ["", "---", ""]
 
     # 7
-    lines.append("## 7. Final Solution Architecture")
+    lines.append("## 7. Solution Architecture")
     lines.append("")
     if mermaid:
         lines.append("```mermaid")
@@ -587,17 +604,6 @@ def generate_markdown(report_data: dict) -> io.BytesIO:
     lines.append("## 11. Architecture Summary")
     lines.append("")
     lines.append(report_data.get("architecture_summary", ""))
-    lines += ["", "---", ""]
-
-    # 12
-    lines.append("## 12. Final Solution Architecture")
-    lines.append("")
-    if mermaid:
-        lines.append("```mermaid")
-        lines.append(mermaid)
-        lines.append("```")
-    else:
-        lines.append("_Architecture diagram not available._")
     lines.append("")
 
     buffer = io.BytesIO()

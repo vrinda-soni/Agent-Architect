@@ -124,35 +124,30 @@ def _sanitize_mermaid(diagram: str) -> str:
 
 def _build_estimation_df(estimation, include_mvp: bool = False) -> pd.DataFrame:
     struct_cols = estimation.structural_columns or []
-    tech_cols = estimation.tech_stack_columns or []
+    owner_cols  = estimation.owner_columns or []
     rows = []
     for item in estimation.estimations:
         data = item if isinstance(item, dict) else item.model_dump(warnings=False)
         row = {col: data.get(col, "") for col in struct_cols}
-        tech_hours = data.get("tech_hours") or {}
-        for col in tech_cols:
-            row[f"{col} (hrs)"] = tech_hours.get(col, 0)
-        row["Remarks - Tech Team"]       = data.get("tech_remarks", "")
-        row["BA Remarks (fill manually)"] = ""  # always blank — BA team fills post-handoff
-        if include_mvp:
-            row["Phase"] = data.get("phase", "")
+        owner_hours = data.get("owner_hours") or {}
+        for col in owner_cols:
+            row[f"{col} (hrs)"] = owner_hours.get(col, 0)
+        row["Tech Remarks"] = data.get("tech_remarks", "")
+        row["BA Remarks"]   = ""
         rows.append(row)
     # Totals row
-    t = estimation.totals
-    t_data = t if isinstance(t, dict) else t.model_dump(warnings=False)
+    t_data = estimation.totals if isinstance(estimation.totals, dict) else estimation.totals.model_dump()
     totals_row = {col: "" for col in struct_cols}
     if len(struct_cols) > 1:
         totals_row[struct_cols[1]] = "TOTALS"
-    for col in tech_cols:
-        totals_row[f"{col} (hrs)"] = (t_data.get("tech_breakdown") or {}).get(col, 0)
-    totals_row["Remarks - Tech Team"]       = f"Grand Total: {t_data.get('total_hours', 0)} hrs"
-    totals_row["BA Remarks (fill manually)"] = ""
-    if include_mvp:
-        p1 = t_data.get("phase1_hours")
-        p2 = t_data.get("phase2_hours")
-        totals_row["Phase"] = f"MVP: {p1} hrs | Full Build: {p2} hrs" if p1 is not None else ""
+    owner_bd = t_data.get("owner_breakdown") or {}
+    for col in owner_cols:
+        totals_row[f"{col} (hrs)"] = owner_bd.get(col, 0)
+    totals_row["Tech Remarks"] = f"Grand Total: {t_data.get('total_hours', 0)} hrs"
+    totals_row["BA Remarks"]   = ""
     rows.append(totals_row)
-    return pd.DataFrame(rows)
+    all_cols = struct_cols + [f"{c} (hrs)" for c in owner_cols] + ["Tech Remarks", "BA Remarks"]
+    return pd.DataFrame(rows, columns=all_cols)
 
 
 def _pipeline_progress(s: dict) -> str:
@@ -256,25 +251,24 @@ def _feasibility_output_to_text(output) -> str:
 
 def _estimation_output_to_text(estimation) -> str:
     lines = ["=== Effort Estimation — Work Breakdown Structure ==="]
-    struct_cols  = estimation.structural_columns or []
-    tech_cols    = estimation.tech_stack_columns or []
+    struct_cols = estimation.structural_columns or []
+    owner_cols  = estimation.owner_columns or []
     for item in estimation.estimations:
         data = item if isinstance(item, dict) else item.model_dump(warnings=False)
         parts = [str(data.get(col, "")) for col in struct_cols if data.get(col)]
-        tech_hours = data.get("tech_hours") or {}
-        for col in tech_cols:
-            hrs = tech_hours.get(col, 0)
+        owner_hours = data.get("owner_hours") or {}
+        for col in owner_cols:
+            hrs = owner_hours.get(col, 0)
             if hrs:
                 parts.append(f"{col}: {hrs} hrs")
         remarks = data.get("tech_remarks", "")
         if remarks:
             parts.append(f"Notes: {remarks}")
         lines.append("- " + " | ".join(p for p in parts if p))
-    t      = estimation.totals
-    t_data = t if isinstance(t, dict) else t.model_dump(warnings=False)
+    t_data = estimation.totals if isinstance(estimation.totals, dict) else estimation.totals.model_dump()
     lines.append(f"\n=== Totals ===\nGrand Total: {t_data.get('total_hours', 0)} hrs")
-    for tech, hrs in (t_data.get("tech_breakdown") or {}).items():
-        lines.append(f"  {tech}: {hrs} hrs")
+    for owner, hrs in (t_data.get("owner_breakdown") or {}).items():
+        lines.append(f"  {owner}: {hrs} hrs")
     return "\n".join(lines)
 
 
@@ -522,7 +516,19 @@ async def _show_planning_result(s: dict) -> None:
 
     await cl.Message(content="\n".join(lines)).send()
 
-    if plan.mermaid_diagram:
+    # Show architecture diagram — Excalidraw PNG preferred, mermaid fallback
+    excalidraw_data = getattr(plan, "excalidraw_diagram", None) or {}
+    if excalidraw_data.get("nodes"):
+        try:
+            from backend.excalidraw_utils import build_excalidraw_json, excalidraw_to_png
+            scene = build_excalidraw_json(excalidraw_data)
+            png_bytes = await asyncio.to_thread(excalidraw_to_png, scene)
+            if png_bytes:
+                img = cl.Image(name="architecture.png", content=png_bytes, display="inline")
+                await cl.Message(content="**🗺️ Architecture Diagram:**", elements=[img]).send()
+        except Exception as _exc:
+            print(f"[Chainlit] Excalidraw render failed: {_exc}")
+    elif plan.mermaid_diagram:
         diagram = _sanitize_mermaid(plan.mermaid_diagram)
         await cl.Message(content=f"**🗺️ Architecture Diagram:**\n\n```mermaid\n{diagram}\n```").send()
 
@@ -619,19 +625,14 @@ async def _show_estimation_result(s: dict) -> None:
     est     = s["estimation_output"]
     inc_mvp = s["include_mvp"]
     df      = _build_estimation_df(est, include_mvp=inc_mvp)
-    t       = est.totals
-    t_data  = t if isinstance(t, dict) else t.model_dump(warnings=False)
 
+    t_data = est.totals if isinstance(est.totals, dict) else est.totals.model_dump()
     lines = ["### 📋 Effort Estimation Table\n", _df_to_md(df), ""]
     lines.append(f"**Grand Total: {t_data.get('total_hours', 0)} hrs**")
-
-    tech_bd = t_data.get("tech_breakdown") or {}
-    if tech_bd:
-        breakdown = " | ".join(f"**{tech}:** {hrs} hrs" for tech, hrs in tech_bd.items())
+    owner_bd = t_data.get("owner_breakdown") or {}
+    if owner_bd:
+        breakdown = " | ".join(f"**{owner}:** {hrs} hrs" for owner, hrs in owner_bd.items())
         lines.append(breakdown)
-
-    if inc_mvp and t_data.get("phase1_hours") is not None:
-        lines.append(f"\nMVP: **{t_data['phase1_hours']} hrs** | Full Build: **{t_data['phase2_hours']} hrs**")
 
     await cl.Message(content="\n".join(lines)).send()
 
@@ -768,19 +769,41 @@ async def _show_report_result(s: dict) -> None:
         await cl.Message(content=f"### 06. Feature & Module Breakdown\n\n{_df_to_md(df_fmb)}").send()
 
     # ── 07. Solution Architecture ─────────────────────────────────────────────
-    # Try plan from session state first, fall back to raw_data in report
     plan_out = s.get("plan_output")
     raw      = report.get("raw_data", {})
-    mermaid  = ""
-    if plan_out and getattr(plan_out, "mermaid_diagram", None):
-        mermaid = plan_out.mermaid_diagram
-    else:
-        mermaid = (raw.get("plan") or {}).get("mermaid_diagram", "")
-    if mermaid:
-        diagram = _sanitize_mermaid(mermaid)
-        await cl.Message(
-            content=f"### 07. Solution Architecture\n\n```mermaid\n{diagram}\n```"
-        ).send()
+
+    # Resolve excalidraw_diagram from session plan_output or raw report data
+    excalidraw_data = {}
+    if plan_out and getattr(plan_out, "excalidraw_diagram", None):
+        excalidraw_data = plan_out.excalidraw_diagram or {}
+    if not excalidraw_data.get("nodes"):
+        excalidraw_data = (raw.get("plan") or {}).get("excalidraw_diagram", {}) or {}
+
+    arch_sent = False
+    if excalidraw_data.get("nodes"):
+        try:
+            from backend.excalidraw_utils import build_excalidraw_json, excalidraw_to_png
+            scene = build_excalidraw_json(excalidraw_data)
+            png_bytes = await asyncio.to_thread(excalidraw_to_png, scene)
+            if png_bytes:
+                img = cl.Image(name="architecture.png", content=png_bytes, display="inline")
+                await cl.Message(content="### 07. Solution Architecture", elements=[img]).send()
+                arch_sent = True
+        except Exception as _exc:
+            print(f"[Chainlit] Report excalidraw render failed: {_exc}")
+
+    if not arch_sent:
+        # Mermaid fallback
+        mermaid = ""
+        if plan_out and getattr(plan_out, "mermaid_diagram", None):
+            mermaid = plan_out.mermaid_diagram
+        else:
+            mermaid = (raw.get("plan") or {}).get("mermaid_diagram", "")
+        if mermaid:
+            diagram = _sanitize_mermaid(mermaid)
+            await cl.Message(
+                content=f"### 07. Solution Architecture\n\n```mermaid\n{diagram}\n```"
+            ).send()
 
     # ── 08. Feasibility Assessment ────────────────────────────────────────────
     ft = report.get("feasibility_table", [])
@@ -1409,8 +1432,7 @@ async def on_run_estimation(action: cl.Action):
             s["approved_estimation"] = s["report_output"] = None
             _save(s)
             asyncio.create_task(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            t_data = result.totals.model_dump()
-            step.output = f"Total: {t_data.get('total_hours', 0)} hrs across {len(result.estimations)} items"
+            step.output = f"Total: {result.totals.total_hours} hrs across {len(result.estimations)} items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation Agent failed: {e}").send()

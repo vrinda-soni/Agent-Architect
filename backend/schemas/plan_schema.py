@@ -48,6 +48,11 @@ class PlanningAgentOutput(BaseModel):
     )
     
     mermaid_diagram: str = Field(
-        ...,
-        description="A Mermaid.js compatible diagram string representing the architecture."
+        default="",
+        description="Legacy mermaid diagram (kept for backward compatibility)."
+    )
+
+    excalidraw_diagram: dict = Field(
+        default_factory=dict,
+        description="Architecture diagram as node/edge format for Excalidraw rendering."
     )
