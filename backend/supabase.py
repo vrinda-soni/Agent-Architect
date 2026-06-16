@@ -96,3 +96,44 @@ def get_report(project_id: str) -> dict:
         .eq("project_id", project_id)\
         .execute()
     return response.data[0] if response.data else {}
+
+
+# ── Pipeline run persistence ───────────────────────────────────────────────────
+
+_PIPELINE_FIELDS = [
+    "task_output", "approved_requirements", "plan_output",
+    "feasibility_output", "estimation_output", "approved_estimation",
+]
+
+def save_pipeline_run(project_id: str, state: dict) -> None:
+    """Persist intermediate agent outputs for a project (upsert)."""
+    if not supabase:
+        return
+    payload = {"project_id": project_id, "updated_at": "now()"}
+    for field in _PIPELINE_FIELDS:
+        val = state.get(field)
+        if val is not None:
+            payload[field] = val if isinstance(val, dict) else (
+                val.model_dump() if hasattr(val, "model_dump") else val
+            )
+    try:
+        supabase.table("pipeline_runs").upsert(
+            payload, on_conflict="project_id"
+        ).execute()
+    except Exception as e:
+        print(f"[DB] save_pipeline_run error: {e}")
+
+
+def load_pipeline_run(project_id: str) -> dict:
+    """Load previously saved agent outputs for a project."""
+    if not supabase:
+        return {}
+    try:
+        resp = supabase.table("pipeline_runs")\
+            .select("*")\
+            .eq("project_id", project_id)\
+            .execute()
+        return resp.data[0] if resp.data else {}
+    except Exception as e:
+        print(f"[DB] load_pipeline_run error: {e}")
+        return {}

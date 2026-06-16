@@ -110,13 +110,14 @@ def _split_with_separators(text: str, separators: list, chunk_size: int, overlap
 
 
 def _embed_gemini(text: str) -> list[float]:
+    from google.genai.types import EmbedContentConfig
     client = _gemini_client()
     result = client.models.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         contents=text,
+        config=EmbedContentConfig(output_dimensionality=768),  # match Supabase pgvector dim
     )
-    # Convert to native Python floats for JSON serialization
-    return [float(v) for v in result.embeddings[0].values]  # 768-dim
+    return [float(v) for v in result.embeddings[0].values]
 
 
 def _embed_hf_bge(text: str) -> list[float]:

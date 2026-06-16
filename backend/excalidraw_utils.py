@@ -268,10 +268,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:#ffffff; overflow:hidden; width:1400px; height:900px; }}
-  #root {{ width:1400px; height:900px; position:relative; }}
-  .excalidraw {{ background:#ffffff !important; }}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#ffffff; overflow:hidden; width:1400px; height:900px; }
+  #root { width:1400px; height:900px; position:relative; }
+  .excalidraw { background:#ffffff !important; }
 </style>
 </head>
 <body>
@@ -282,26 +282,26 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <script>
 var SCENE = {scene_json};
 
-var App = function() {{
+var App = function() {
   var ref = React.useRef(null);
-  React.useEffect(function() {{
-    if (ref.current) {{
+  React.useEffect(function() {
+    if (ref.current) {
       ref.current.updateScene(SCENE);
-      ref.current.scrollToContent(SCENE.elements, {{ fitFactor: 0.85, animate: false }});
-    }}
-  }}, []);
-  return React.createElement(ExcalidrawLib.Excalidraw, {{
-    excalidrawAPI: function(api) {{ ref.current = api; }},
+      ref.current.scrollToContent(SCENE.elements, { fitFactor: 0.85, animate: false });
+    }
+  }, []);
+  return React.createElement(ExcalidrawLib.Excalidraw, {
+    excalidrawAPI: function(api) { ref.current = api; },
     initialData: SCENE,
     viewModeEnabled: true,
     zenModeEnabled: true,
     gridModeEnabled: false,
-    UIOptions: {{
-      canvasActions: {{ export: false, loadScene: false, saveAsImage: false, changeViewBackgroundColor: false }},
-      tools: {{ image: false }}
-    }}
-  }});
-}};
+    UIOptions: {
+      canvasActions: { export: false, loadScene: false, saveAsImage: false, changeViewBackgroundColor: false },
+      tools: { image: false }
+    }
+  });
+};
 
 ReactDOM.render(React.createElement(App), document.getElementById('root'));
 </script>

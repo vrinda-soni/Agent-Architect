@@ -32,13 +32,64 @@ if GEMINI_API_KEY:
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 GEMINI_MODEL = "gemini-2.0-flash"
 
-# Ordered list of fallback models
+# Per-agent fallback chains.
+# Rules:
+#   - estimation_agent: NEVER use llama-3.3 (2048 output cap truncates large JSON)
+#   - planning_agent:   needs strong reasoning; deepseek-r1 is good here
+#   - qa_agent:         short answers → cheap/free models are fine; llama-3.3 is acceptable
+#   - default:          safe full chain used for any agent not listed below
+_AGENT_FALLBACKS: dict[str, list[str]] = {
+    "task_agent": [
+        "openai/gpt-oss-120b",
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+    ],
+    "planning_agent": [
+        "openai/gpt-oss-120b",
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen3-32b",
+        "qwen/qwen-2.5-72b-instruct:free",
+    ],
+    "feasibility_agent": [
+        "openai/gpt-oss-120b",
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+    ],
+    "estimation_agent": [
+        # Must have ≥8192 output tokens — NO llama-3.3 (only 2048)
+        "openai/gpt-oss-120b",
+        "deepseek/deepseek-r1:free",
+        "deepseek/deepseek-chat-v3-0324:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "moonshotai/kimi-k2.6:free",
+    ],
+    "report_agent": [
+        "openai/gpt-oss-120b",
+        "qwen/qwen3-32b",
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+    ],
+    "qa_agent": [
+        # Short answers → free models first to save quota
+        "deepseek/deepseek-r1:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "deepseek/deepseek-chat-v3-0324:free",
+        "google/gemma-4-31b-it:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ],
+}
+
+# Default fallback chain used when agent_name is not in _AGENT_FALLBACKS
 FALLBACK_MODELS = [
     "openai/gpt-oss-120b",
     "qwen/qwen3-32b",
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen-2.5-72b-instruct:free",
     "moonshotai/kimi-k2.6:free",
     "google/gemma-4-31b-it:free",
     "google/gemma-4-26b-a4b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
 ]
 
 
@@ -214,9 +265,10 @@ def generate_with_fallback(
                     flush()
                 raise
 
-    # Fallback chain through OpenRouter models
+    # Fallback chain through OpenRouter models (agent-specific or default)
+    fallback_list = _AGENT_FALLBACKS.get(agent_name, FALLBACK_MODELS)
     last_error = None
-    for model in FALLBACK_MODELS:
+    for model in fallback_list:
         gen = None
         try:
             gen = active_trace.generation(
@@ -242,6 +294,6 @@ def generate_with_fallback(
         flush()
 
     raise ValueError(
-        f"All models failed (Gemini + {len(FALLBACK_MODELS)} OpenRouter fallbacks). "
+        f"All models failed (Gemini + {len(fallback_list)} OpenRouter fallbacks for '{agent_name}'). "
         f"Last error: {last_error}"
     ) from last_error

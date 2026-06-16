@@ -85,6 +85,72 @@ def _save(s: dict) -> None:
     cl.user_session.set("state", s)
 
 
+def _bg(coro) -> None:
+    """Schedule a coroutine to run AFTER the current callback returns.
+    This prevents Chainlit from tracking it as part of the current action,
+    which would keep buttons greyed until the task finishes."""
+    loop = asyncio.get_event_loop()
+    loop.call_soon(lambda: asyncio.ensure_future(coro))
+
+
+def _to_dict(obj) -> dict:
+    """Safely convert a Pydantic model or dict to a plain dict."""
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    return obj.model_dump()
+
+
+def _db_save(s: dict) -> None:
+    """Persist current pipeline outputs to Supabase (fire-and-forget, never raises)."""
+    pid = (s.get("selected_project") or {}).get("id")
+    if not pid:
+        return
+    try:
+        db.save_pipeline_run(pid, s)
+    except Exception as e:
+        print(f"[Persist] save error: {e}")
+
+
+def _db_load(s: dict) -> None:
+    """Restore pipeline outputs from Supabase into session state, re-hydrating Pydantic models."""
+    pid = (s.get("selected_project") or {}).get("id")
+    if not pid:
+        return
+    try:
+        row = db.load_pipeline_run(pid)
+        if not row:
+            return
+        from backend.schemas.task_schema import TaskAgentOutput
+        from backend.schemas.plan_schema import PlanningAgentOutput
+        from backend.schemas.feasibility_schema import FeasibilityAgentOutput
+        from backend.schemas.estimation_schema import EstimationAgentOutput
+
+        _schema_map = {
+            "task_output": TaskAgentOutput,
+            "plan_output": PlanningAgentOutput,
+            "feasibility_output": FeasibilityAgentOutput,
+            "estimation_output": EstimationAgentOutput,
+        }
+        for field in ("task_output", "approved_requirements", "plan_output",
+                      "feasibility_output", "estimation_output", "approved_estimation"):
+            val = row.get(field)
+            if val:
+                cls = _schema_map.get(field)
+                if cls and isinstance(val, dict):
+                    try:
+                        s[field] = cls(**val)
+                    except Exception as hydrate_err:
+                        print(f"[Persist] hydration failed for {field}: {hydrate_err}")
+                        s[field] = val  # keep raw dict as fallback
+                else:
+                    s[field] = val
+        print(f"[Persist] Restored pipeline for project {pid}")
+    except Exception as e:
+        print(f"[Persist] load error: {e}")
+
+
 def _reset_pipeline(s: dict) -> None:
     for k in ("plan_output", "feasibility_output", "approved_plan",
               "approved_feasibility", "estimation_output", "approved_estimation",
@@ -124,6 +190,12 @@ def _sanitize_mermaid(diagram: str) -> str:
 
 
 def _build_estimation_df(estimation, include_mvp: bool = False) -> pd.DataFrame:
+    if isinstance(estimation, dict):
+        from backend.schemas.estimation_schema import EstimationAgentOutput
+        try:
+            estimation = EstimationAgentOutput(**estimation)
+        except Exception:
+            return pd.DataFrame({"Error": ["Invalid estimation format"]})
     struct_cols = estimation.structural_columns or []
     owner_cols  = estimation.owner_columns or []
     rows = []
@@ -424,34 +496,66 @@ async def _show_project_menu(user: cl.User, s: dict) -> None:
 async def _show_transcript_step(project: dict, s: dict) -> None:
     s["step"] = "transcript"
     _save(s)
+    pid = project["id"]
+
+    # ── 1. Meeting transcript (mandatory) ────────────────────────────────────
+    existing_transcript = ""
     try:
-        tr = db.get_transcript(project["id"])
-        if tr and tr.get("content", "").strip():
-            s["current_transcript"] = tr["content"]
-            _save(s)
-            preview = tr["content"][:400] + ("..." if len(tr["content"]) > 400 else "")
-            await cl.Message(
-                content=(
-                    f"📄 **Existing transcript** for *{project['name']}*:\n\n"
-                    f"```\n{preview}\n```\n\nUse this or provide a new one?"
-                ),
-                actions=[
-                    cl.Action(name="use_existing_transcript", payload={}, label="✅ Use Existing"),
-                    cl.Action(name="upload_new_transcript",   payload={}, label="📤 Upload New File"),
-                    cl.Action(name="paste_new_transcript",    payload={}, label="📝 Paste New Text"),
-                ],
-            ).send()
-            return
+        tr = db.get_transcript(pid)
+        existing_transcript = (tr or {}).get("content", "").strip()
     except Exception:
         pass
 
-    await cl.Message(
-        content=f"### Step 1 — Upload Transcript for *{project['name']}*\n\nHow would you like to provide the client meeting transcript?",
-        actions=[
-            cl.Action(name="upload_new_transcript", payload={}, label="📤 Upload File (PDF/DOCX/TXT)"),
-            cl.Action(name="paste_new_transcript",  payload={}, label="📝 Paste Text"),
-        ],
-    ).send()
+    if existing_transcript:
+        s["current_transcript"] = existing_transcript
+        _save(s)
+        preview = existing_transcript[:300] + ("..." if len(existing_transcript) > 300 else "")
+        await cl.Message(
+            content=(
+                f"### Step 1 — Meeting Transcript for *{project['name']}*\n\n"
+                f"📄 **Saved transcript** *(first 300 chars)*:\n```\n{preview}\n```"
+            ),
+            actions=[
+                cl.Action(name="use_existing_transcript", payload={}, label="✅ Use This Transcript"),
+                cl.Action(name="upload_new_transcript",   payload={}, label="📤 Replace with New File"),
+                cl.Action(name="paste_new_transcript",    payload={}, label="📝 Replace with Paste"),
+            ],
+        ).send()
+    else:
+        await cl.Message(
+            content=(
+                f"### Step 1 — Meeting Transcript for *{project['name']}*\n\n"
+                f"Upload or paste the **client meeting transcript** (recording notes, call summary, etc.):"
+            ),
+            actions=[
+                cl.Action(name="upload_new_transcript", payload={}, label="📤 Upload File (PDF/DOCX/TXT)"),
+                cl.Action(name="paste_new_transcript",  payload={}, label="📝 Paste Text"),
+            ],
+        ).send()
+
+    # ── 2. Reference docs (optional, completely separate) ────────────────────
+    try:
+        ref_docs = list_project_documents(pid)
+        if ref_docs:
+            doc_list = "\n".join(f"- 📎 {d['document_name']}" for d in ref_docs)
+            await cl.Message(
+                content=(
+                    f"**📚 Reference Documents** *(optional — already indexed for this project)*:\n{doc_list}\n\n"
+                    f"These give agents extra context. You can add more or skip."
+                ),
+                actions=[
+                    cl.Action(name="upload_ref_docs", payload={}, label="➕ Add More Reference Docs"),
+                ],
+            ).send()
+        else:
+            await cl.Message(
+                content="**📚 Reference Documents** *(optional)*: No reference docs uploaded yet.",
+                actions=[
+                    cl.Action(name="upload_ref_docs", payload={}, label="📄 Upload Reference Docs (Optional)"),
+                ],
+            ).send()
+    except Exception:
+        pass
 
 
 # ── Step 2: Task Agent ────────────────────────────────────────────────────────
@@ -463,12 +567,10 @@ async def _show_task_agent_step(s: dict) -> None:
         content=(
             "### Step 2 — Task Identification Agent\n\n"
             "Extracts **requirements**, **pain points**, **constraints**, **business goals**, "
-            "and **technology context** from your transcript using Gemini AI.\n\n"
-            "*(Optional: upload reference PDFs/docs to give agents extra context)*"
+            "and **technology context** from your transcript using Gemini AI."
         ),
         actions=[
-            cl.Action(name="run_task_agent",  payload={}, label="▶ Run Task Agent"),
-            cl.Action(name="upload_ref_docs", payload={}, label="📄 Upload Reference Docs"),
+            cl.Action(name="run_task_agent", payload={}, label="▶ Run Task Agent"),
         ],
     ).send()
 
@@ -671,7 +773,15 @@ async def _show_estimation_step(s: dict) -> None:
 
 async def _show_estimation_result(s: dict) -> None:
     """Mirrors render_estimation_section results block."""
-    est     = s["estimation_output"]
+    est = s["estimation_output"]
+    if isinstance(est, dict):
+        from backend.schemas.estimation_schema import EstimationAgentOutput
+        try:
+            est = EstimationAgentOutput(**est)
+            s["estimation_output"] = est
+        except Exception as e:
+            await cl.Message(content=f"⚠️ Could not display estimation — format error: {e}").send()
+            return
     inc_mvp = s["include_mvp"]
     df      = _build_estimation_df(est, include_mvp=inc_mvp)
 
@@ -884,29 +994,25 @@ async def _show_report_result(s: dict) -> None:
         "### 11. Architecture Summary\n\n" + report.get("architecture_summary", "")
     )).send()
 
-    # ── Effort Estimation embedded in report ──────────────────────────────────
+    # ── Effort Estimation Summary (condensed — full table available in Step 5) ──
     est_obj = s.get("estimation_output")
     if est_obj:
-        _inc_mvp = s.get("include_mvp", False)
-        df_est   = _build_estimation_df(est_obj, include_mvp=_inc_mvp)
-        t_total  = est_obj.totals.total_hours
-        try:
-            _xl_buf = io.BytesIO()
-            with pd.ExcelWriter(_xl_buf, engine="openpyxl") as w:
-                df_est.to_excel(w, index=False, sheet_name="Effort Estimation")
-            await cl.Message(
-                content=f"**📊 Effort Estimation (Grand Total: {t_total} hrs)**\n\n{_df_to_md(df_est)}",
-                elements=[cl.File(
-                    name="effort_estimation.xlsx",
-                    content=_xl_buf.getvalue(),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    display="inline",
-                )],
-            ).send()
-        except Exception:
-            await cl.Message(
-                content=f"**📊 Effort Estimation (Grand Total: {t_total} hrs)**\n\n{_df_to_md(df_est)}"
-            ).send()
+        if isinstance(est_obj, dict):
+            from backend.schemas.estimation_schema import EstimationAgentOutput
+            try:
+                est_obj = EstimationAgentOutput(**est_obj)
+            except Exception:
+                est_obj = None
+    if est_obj:
+        t_data   = est_obj.totals if isinstance(est_obj.totals, dict) else est_obj.totals.model_dump()
+        t_total  = t_data.get("total_hours", 0)
+        owner_bd = t_data.get("owner_breakdown") or {}
+        est_lines = ["### 📊 Effort Estimation Summary\n", f"**Grand Total: {t_total} hrs**"]
+        if owner_bd:
+            est_lines.append("\n**By Owner:**")
+            for owner, hrs in owner_bd.items():
+                est_lines.append(f"- **{owner}:** {hrs} hrs")
+        await cl.Message(content="\n".join(est_lines)).send()
 
     # ── Downloads ─────────────────────────────────────────────────────────────
     await cl.Message(content="⏳ Preparing download files…").send()
@@ -946,10 +1052,10 @@ async def _show_report_result(s: dict) -> None:
     if project_id:
         transcript = s.get("current_transcript", "")
         if transcript.strip():
-            asyncio.create_task(_ingest_to_rag(project_id, transcript, "transcript.txt", "txt"))
+            _bg(_ingest_to_rag(project_id, transcript, "transcript.txt", "txt"))
         report_text = _report_to_index_text(report)
         if report_text.strip():
-            asyncio.create_task(_ingest_to_rag(project_id, report_text, "final_report.txt", "txt"))
+            _bg(_ingest_to_rag(project_id, report_text, "final_report.txt", "txt"))
 
     s["step"] = "qa_mode"
     _save(s)
@@ -1096,7 +1202,7 @@ async def _save_transcript_text(s: dict, text: str) -> None:
         _reset_pipeline(s)
         _save(s)
         await cl.Message(content=f"✅ Transcript saved ({len(text):,} chars). Indexing for Q&A in background…").send()
-        asyncio.create_task(_ingest_to_rag(project["id"], text.strip(), "transcript.txt", "txt"))
+        _bg(_ingest_to_rag(project["id"], text.strip(), "transcript.txt", "txt"))
         await _show_task_agent_step(s)
     except Exception as e:
         await cl.Message(content=f"❌ Failed to save transcript: {e}").send()
@@ -1178,9 +1284,30 @@ async def on_select_project(action: cl.Action):
             s["task_output"] = None
             s["approved_requirements"] = None
             _reset_pipeline(s)
+            _db_load(s)   # restore any previously saved pipeline outputs
             _save(s)
-            await cl.Message(content=f"✅ Project **{project['name']}** selected.").send()
-            await _show_transcript_step(project, s)
+
+            # Determine how far the pipeline was previously completed
+            has_estimation = bool(s.get("estimation_output"))
+            has_plan       = bool(s.get("plan_output"))
+            has_task       = bool(s.get("task_output"))
+
+            if has_estimation or has_plan or has_task:
+                stage = ("Estimation" if has_estimation else "Planning" if has_plan else "Requirements")
+                await cl.Message(
+                    content=(
+                        f"✅ Project **{project['name']}** selected.\n\n"
+                        f"🗂️ *Previous pipeline restored up to **{stage}** stage.*\n\n"
+                        f"What would you like to do?"
+                    ),
+                    actions=[
+                        cl.Action(name="resume_pipeline",  payload={}, label="▶️ Resume Pipeline"),
+                        cl.Action(name="restart_pipeline", payload={"project_id": project["id"]}, label="🔄 Start Fresh"),
+                    ],
+                ).send()
+            else:
+                await cl.Message(content=f"✅ Project **{project['name']}** selected.").send()
+                await _show_transcript_step(project, s)
     except Exception as e:
         await cl.Message(content=f"❌ Error: {e}").send()
 
@@ -1191,6 +1318,46 @@ async def on_new_project(action: cl.Action):
     s["step"] = "create_project"
     _save(s)
     await cl.Message(content="📝 Type a name for your new project:").send()
+
+
+@cl.action_callback("resume_pipeline")
+async def on_resume_pipeline(action: cl.Action):
+    """Jump to the furthest completed stage when restoring from DB."""
+    s = _state()
+    if s.get("approved_estimation"):
+        await _show_report_step(s)
+    elif s.get("estimation_output"):
+        await _show_estimation_result(s)
+        await _show_hitl3(s)
+    elif s.get("feasibility_output"):
+        await _show_planning_result(s)
+        await _show_feasibility_result(s)
+        await _show_hitl2(s)
+    elif s.get("task_output"):
+        await _show_hitl1(s)
+    else:
+        await _show_transcript_step(s["selected_project"], s)
+
+
+@cl.action_callback("restart_pipeline")
+async def on_restart_pipeline(action: cl.Action):
+    """Clear all pipeline outputs and start fresh from transcript step."""
+    s = _state()
+    s["task_output"] = None
+    s["approved_requirements"] = None
+    _reset_pipeline(s)
+    s["current_transcript"] = ""
+    _save(s)
+    # Clear from DB too
+    try:
+        import backend.supabase as _db
+        pid = (s.get("selected_project") or {}).get("id")
+        if pid:
+            _db.supabase.table("pipeline_runs").delete().eq("project_id", pid).execute()
+    except Exception:
+        pass
+    await cl.Message(content="🔄 Pipeline cleared. Starting fresh…").send()
+    await _show_transcript_step(s["selected_project"], s)
 
 
 @cl.action_callback("use_existing_transcript")
@@ -1241,7 +1408,8 @@ async def on_run_task_agent(action: cl.Action):
             s["approved_requirements"] = None
             _reset_pipeline(s)
             _save(s)
-            asyncio.create_task(_ingest_to_rag(
+            _db_save(s)
+            _bg(_ingest_to_rag(
                 (s["selected_project"] or {}).get("id", ""),
                 _task_output_to_text(result), "task_agent_output.txt"
             ))
@@ -1262,9 +1430,10 @@ async def on_run_task_agent(action: cl.Action):
 async def on_hitl1_approve(action: cl.Action):
     s   = _state()
     pid = (s["selected_project"] or {}).get("id")
-    s["approved_requirements"] = s["task_output"].model_dump()
+    s["approved_requirements"] = _to_dict(s["task_output"])
     _reset_pipeline(s)
     _save(s)
+    _db_save(s)
 
     await cl.Message(content="✅ Requirements approved! Auto-running Planning & Feasibility agents…").send()
 
@@ -1278,7 +1447,8 @@ async def on_hitl1_approve(action: cl.Action):
             )
             s["plan_output"] = plan_result
             _save(s)
-            asyncio.create_task(_ingest_to_rag(pid, _plan_output_to_text(plan_result), "planning_agent_output.txt"))
+            _db_save(s)
+            _bg(_ingest_to_rag(pid, _plan_output_to_text(plan_result), "planning_agent_output.txt"))
             step.output = f"Architecture: {plan_result.architecture_type}"
         except Exception as e:
             step.output = f"Failed: {e}"
@@ -1294,7 +1464,8 @@ async def on_hitl1_approve(action: cl.Action):
                 )
                 s["feasibility_output"] = feas
                 _save(s)
-                asyncio.create_task(_ingest_to_rag(pid, _feasibility_output_to_text(feas), "feasibility_agent_output.txt"))
+                _db_save(s)
+                _bg(_ingest_to_rag(pid, _feasibility_output_to_text(feas), "feasibility_agent_output.txt"))
                 step.output = f"Complexity: {feas.complexity_level} | Confidence: {getattr(feas,'feasibility_confidence','—')}"
             except Exception as e:
                 step.output = f"Failed: {e}"
@@ -1331,7 +1502,7 @@ async def on_hitl1_regen(action: cl.Action):
             s["approved_requirements"] = None
             _reset_pipeline(s)
             _save(s)
-            asyncio.create_task(_ingest_to_rag(
+            _bg(_ingest_to_rag(
                 (s["selected_project"] or {}).get("id", ""),
                 _task_output_to_text(result), "task_agent_output.txt"
             ))
@@ -1349,8 +1520,8 @@ async def on_hitl1_regen(action: cl.Action):
 @cl.action_callback("hitl2_approve")
 async def on_hitl2_approve(action: cl.Action):
     s = _state()
-    s["approved_plan"]        = s["plan_output"].model_dump()
-    s["approved_feasibility"] = s["feasibility_output"].model_dump()
+    s["approved_plan"]        = _to_dict(s["plan_output"])
+    s["approved_feasibility"] = _to_dict(s["feasibility_output"])
     _save(s)
     await cl.Message(content="✅ Plan & Feasibility approved! Ready for Estimation Agent.").send()
     await _show_estimation_step(s)
@@ -1383,7 +1554,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
             s["approved_plan"] = s["approved_feasibility"] = None
             s["estimation_output"] = s["approved_estimation"] = s["report_output"] = None
             _save(s)
-            asyncio.create_task(_ingest_to_rag(pid, _plan_output_to_text(plan_result), "planning_agent_output.txt"))
+            _bg(_ingest_to_rag(pid, _plan_output_to_text(plan_result), "planning_agent_output.txt"))
             step.output = f"Architecture: {plan_result.architecture_type}"
         except Exception as e:
             step.output = f"Failed: {e}"
@@ -1400,7 +1571,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
             )
             s["feasibility_output"] = feas
             _save(s)
-            asyncio.create_task(_ingest_to_rag(pid, _feasibility_output_to_text(feas), "feasibility_agent_output.txt"))
+            _bg(_ingest_to_rag(pid, _feasibility_output_to_text(feas), "feasibility_agent_output.txt"))
             step.output = f"Complexity: {feas.complexity_level}"
         except Exception as e:
             step.output = f"Failed: {e}"
@@ -1430,12 +1601,12 @@ async def on_hitl2_rerun_feas(action: cl.Action):
         try:
             result = await asyncio.to_thread(
                 partial(call_feasibility_agent, s["approved_requirements"],
-                        s["plan_output"].model_dump(), feedback=feedback)
+                        _to_dict(s["plan_output"]), feedback=feedback)
             )
             s["feasibility_output"] = result
             s["approved_feasibility"] = s["estimation_output"] = s["approved_estimation"] = s["report_output"] = None
             _save(s)
-            asyncio.create_task(_ingest_to_rag(
+            _bg(_ingest_to_rag(
                 (s["selected_project"] or {}).get("id", ""),
                 _feasibility_output_to_text(result), "feasibility_agent_output.txt"
             ))
@@ -1479,8 +1650,8 @@ async def on_run_estimation(action: cl.Action):
             result = await asyncio.to_thread(partial(
                 run_estimation_agent,
                 s["approved_requirements"],
-                s["plan_output"].model_dump(),
-                s["feasibility_output"].model_dump(),
+                _to_dict(s["plan_output"]),
+                _to_dict(s["feasibility_output"]),
                 transcript=s.get("current_transcript", ""),
                 include_mvp=inc_mvp,
                 rag_context=rag_context,
@@ -1488,7 +1659,8 @@ async def on_run_estimation(action: cl.Action):
             s["estimation_output"] = result
             s["approved_estimation"] = s["report_output"] = None
             _save(s)
-            asyncio.create_task(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
+            _db_save(s)
+            _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
             step.output = f"Total: {result.totals.total_hours} hrs across {len(result.estimations)} items"
         except Exception as e:
             step.output = f"Failed: {e}"
@@ -1504,8 +1676,9 @@ async def on_run_estimation(action: cl.Action):
 @cl.action_callback("hitl3_approve")
 async def on_hitl3_approve(action: cl.Action):
     s = _state()
-    s["approved_estimation"] = s["estimation_output"].model_dump()
+    s["approved_estimation"] = _to_dict(s["estimation_output"])
     _save(s)
+    _db_save(s)
     await cl.Message(content="✅ Estimation approved! Ready to generate the Final Report.").send()
     await _show_report_step(s)
 
@@ -1533,8 +1706,8 @@ async def on_hitl3_regen(action: cl.Action):
             result = await asyncio.to_thread(partial(
                 call_estimation_agent,
                 s["approved_requirements"],
-                s["plan_output"].model_dump(),
-                s["feasibility_output"].model_dump(),
+                _to_dict(s["plan_output"]),
+                _to_dict(s["feasibility_output"]),
                 project_id=pid,
                 transcript=s.get("current_transcript", ""),
                 include_mvp=inc_mvp,
@@ -1543,7 +1716,8 @@ async def on_hitl3_regen(action: cl.Action):
             s["estimation_output"] = result
             s["approved_estimation"] = s["report_output"] = None
             _save(s)
-            asyncio.create_task(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
+            _db_save(s)
+            _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
             t_data = result.totals.model_dump()
             step.output = f"Total: {t_data.get('total_hours', 0)} hrs"
         except Exception as e:
@@ -1592,10 +1766,10 @@ async def on_download_docx(action: cl.Action):
 @cl.action_callback("generate_report")
 async def on_generate_report(action: cl.Action):
     s    = _state()
-    req  = s["approved_requirements"] or (s["task_output"].model_dump() if s["task_output"] else {})
-    plan = s["approved_plan"] or (s["plan_output"].model_dump() if s["plan_output"] else {})
-    feas = s["approved_feasibility"] or (s["feasibility_output"].model_dump() if s["feasibility_output"] else {})
-    est  = s["approved_estimation"] or (s["estimation_output"].model_dump() if s["estimation_output"] else {})
+    req  = s["approved_requirements"] or _to_dict(s.get("task_output"))
+    plan = s["approved_plan"] or _to_dict(s.get("plan_output"))
+    feas = s["approved_feasibility"] or _to_dict(s.get("feasibility_output"))
+    est  = s["approved_estimation"] or _to_dict(s.get("estimation_output"))
 
     missing = [name for name, val in [("requirements", req), ("plan", plan), ("feasibility", feas), ("estimation", est)] if not val]
     if missing:
