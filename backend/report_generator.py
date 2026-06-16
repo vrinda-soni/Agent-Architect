@@ -354,121 +354,122 @@ def generate_docx(report_data: dict) -> io.BytesIO:
 
 
 def generate_pdf(report_data: dict) -> io.BytesIO:
-    """Generate PDF by converting Markdown → HTML → PDF (proper layout, no overlap)."""
-    import base64
-    import markdown as md_lib
-    from weasyprint import HTML, CSS
-
+    """Generate PDF via Markdown → fpdf2 (no external binary required)."""
     raw = report_data.get("raw_data", {})
     plan_data = raw.get("plan", {})
-
-    # Render architecture diagram to PNG first (Excalidraw preferred)
     diagram_png = _get_diagram_png(plan_data)
 
-    # Get the markdown content
-    md_buf = generate_markdown(report_data)
-    md_text = md_buf.read().decode("utf-8")
+    pdf = ReportPDF()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
 
-    # Convert markdown to HTML
-    html_body = md_lib.markdown(md_text, extensions=["tables", "fenced_code", "nl2br"])
+    # Title block
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(30, 58, 95)
+    pdf.cell(0, 12, "Project Consulting Report", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 7, f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.ln(6)
 
-    # Inject diagram PNG (base64) into Section 7, replacing the placeholder
+    def bullet_list(items: list):
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(50, 50, 50)
+        for item in items:
+            pdf.cell(5, 6, "")
+            pdf.multi_cell(0, 6, _safe(f"•  {item}"))
+
+    # 1. Executive Summary
+    pdf.section_title("1. Executive Summary")
+    pdf.paragraph(report_data.get("executive_summary", ""))
+
+    # 2. Background Summary
+    pdf.section_title("2. Background Summary")
+    pdf.paragraph(report_data.get("background_summary", ""))
+
+    # 3. Problem / Need Analysis
+    pdf.section_title("3. Problem / Need Analysis")
+    rows = [
+        (r.get("problem_need", ""), r.get("business_impact", ""))
+        for r in report_data.get("problem_need_analysis", [])
+    ]
+    pdf.simple_table(["Problem / Need", "Business Impact"], rows, [95, 95])
+
+    # 4. Requirements Analysis
+    pdf.section_title("4. Requirements Analysis")
+    pdf.subsection_title("Functional Requirements")
+    rows = [(r.get("id", ""), r.get("requirement", "")) for r in report_data.get("functional_requirements", [])]
+    pdf.simple_table(["ID", "Requirement"], rows, [25, 165])
+
+    pdf.subsection_title("Non-Functional Requirements")
+    rows = [(r.get("category", ""), r.get("requirement", "")) for r in report_data.get("non_functional_requirements", [])]
+    pdf.simple_table(["Category", "Requirement"], rows, [45, 145])
+
+    pdf.subsection_title("Constraints")
+    bullet_list(report_data.get("constraints", []))
+    pdf.ln(3)
+
+    pdf.subsection_title("Business Goals")
+    bullet_list(report_data.get("business_goals", []))
+    pdf.ln(3)
+
+    pdf.subsection_title("Technology Context")
+    bullet_list(report_data.get("technology_context", []))
+    pdf.ln(3)
+
+    # 5. Assumptions
+    pdf.section_title("5. Assumptions")
+    bullet_list(report_data.get("assumptions", []))
+    pdf.ln(3)
+
+    # 6. Feature & Module Breakdown
+    pdf.section_title("6. Feature & Module Breakdown")
+    rows = [
+        (r.get("module", ""), r.get("feature_functionality", ""), r.get("technologies_used", ""))
+        for r in report_data.get("feature_module_breakdown", [])
+    ]
+    pdf.simple_table(["Module", "Feature / Functionality", "Technologies Used"], rows, [45, 100, 45])
+
+    # 7. Solution Architecture
+    pdf.section_title("7. Solution Architecture")
     if diagram_png:
-        b64 = base64.b64encode(diagram_png).decode()
-        img_tag = (
-            f'<img src="data:image/png;base64,{b64}" '
-            f'style="max-width:100%;height:auto;margin:12px 0;border:1px solid #CBD5E0;border-radius:4px;" />'
-        )
-        html_body = html_body.replace(
-            "<em>Architecture diagram not available.</em>",
-            img_tag,
-        )
+        try:
+            img_buf = io.BytesIO(diagram_png)
+            pdf.image(img_buf, w=180)
+            pdf.ln(4)
+        except Exception:
+            pdf.paragraph("Architecture diagram could not be rendered.")
+    else:
+        pdf.paragraph("Architecture diagram not available.")
 
-    # Build full HTML with professional CSS
-    html_full = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  @page {{
-    margin: 2cm 2.5cm;
-    @bottom-right {{ content: "Page " counter(page); font-size: 9pt; color: #666; }}
-  }}
-  body {{
-    font-family: "Helvetica Neue", Arial, sans-serif;
-    font-size: 10pt;
-    color: #1a1a2e;
-    line-height: 1.6;
-  }}
-  h1 {{
-    color: #1E3A5F;
-    font-size: 22pt;
-    text-align: center;
-    border-bottom: 3px solid #1E3A5F;
-    padding-bottom: 8px;
-    margin-bottom: 4px;
-  }}
-  h2 {{
-    color: #1E3A5F;
-    font-size: 14pt;
-    border-bottom: 1.5px solid #1E3A5F;
-    padding-bottom: 4px;
-    margin-top: 24px;
-    page-break-after: avoid;
-  }}
-  h3 {{
-    color: #2C5282;
-    font-size: 11pt;
-    margin-top: 16px;
-    page-break-after: avoid;
-  }}
-  p {{ margin: 6px 0 10px 0; }}
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-    margin: 12px 0;
-    font-size: 9pt;
-    page-break-inside: avoid;
-  }}
-  th {{
-    background-color: #1E3A5F;
-    color: #ffffff;
-    padding: 7px 10px;
-    text-align: left;
-    font-weight: bold;
-  }}
-  td {{
-    padding: 6px 10px;
-    border: 1px solid #CBD5E0;
-    vertical-align: top;
-    word-wrap: break-word;
-  }}
-  tr:nth-child(even) td {{ background-color: #E8F0FE; }}
-  tr:nth-child(odd) td  {{ background-color: #ffffff; }}
-  code, pre {{
-    font-family: "Courier New", monospace;
-    font-size: 8pt;
-    background: #F7FAFC;
-    border: 1px solid #E2E8F0;
-    border-radius: 3px;
-    padding: 2px 4px;
-    white-space: pre-wrap;
-    word-break: break-all;
-  }}
-  pre {{ padding: 10px; margin: 8px 0; }}
-  hr {{ border: none; border-top: 1px solid #CBD5E0; margin: 16px 0; }}
-  ul, ol {{ margin: 6px 0 10px 1.2em; padding: 0; }}
-  li {{ margin: 3px 0; }}
-  em {{ color: #718096; font-size: 9pt; }}
-</style>
-</head>
-<body>
-{html_body}
-</body>
-</html>"""
+    # 8. Feasibility Assessment
+    pdf.section_title("8. Feasibility Assessment")
+    rows = [
+        (r.get("metric", ""), r.get("value", ""), r.get("reason", ""))
+        for r in report_data.get("feasibility_table", [])
+    ]
+    pdf.simple_table(["Metric", "Value", "Reason"], rows, [50, 30, 110])
 
-    pdf_bytes = HTML(string=html_full).write_pdf()
-    return io.BytesIO(pdf_bytes)
+    # 9. Risk Assessment
+    pdf.section_title("9. Risk Assessment")
+    rows = [
+        (r.get("risk", ""), r.get("impact", ""), r.get("mitigation_strategy", ""))
+        for r in report_data.get("risk_assessment", [])
+    ]
+    pdf.simple_table(["Risk", "Impact", "Mitigation Strategy"], rows, [55, 40, 95])
+
+    # 10. Recommendations & Next Steps
+    pdf.section_title("10. Recommendations & Next Steps")
+    pdf.paragraph(report_data.get("recommendations_next_steps", ""))
+
+    # 11. Architecture Summary
+    pdf.section_title("11. Architecture Summary")
+    pdf.paragraph(report_data.get("architecture_summary", ""))
+
+    buffer = io.BytesIO()
+    pdf.output(buffer)
+    buffer.seek(0)
+    return buffer
 
 
 def generate_json(report_data: dict) -> io.BytesIO:
