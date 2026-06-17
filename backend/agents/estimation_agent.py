@@ -74,7 +74,7 @@ For each row:
 - ba_remarks: always empty string ""
 
 Complexity values: Low, Medium, Medium-High, High, Very High
-
+example:
 Hour benchmarks per owner:
   Frontend: UI layout 4-10hrs, component 6-16hrs, form+validation 8-14hrs, dashboard 12-22hrs
   Backend: CRUD API 8-14hrs, auth backend 16-24hrs, complex service 14-24hrs, file upload 12-18hrs
@@ -88,7 +88,7 @@ MINIMUM ROWS: small project (≤5 reqs) → 15 rows; medium (6-12 reqs) → 25 r
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT — valid JSON only
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
+For example: 
 {{
   "structural_columns": ["No", "Functionality Type", "Module", "Feature", "Task", "Sub Task", "Complexity", "Dependencies"],
   "owner_columns": ["Frontend", "Backend", "AI/ML", "DevOps", "QA"],
@@ -131,7 +131,7 @@ STRICT RULES:
 2. owner_columns = exact list of keys inside every owner_hours dict
 3. Every row must have ALL structural column keys
 4. Every row's owner_hours must have ALL owner_columns keys (use 0 for no work)
-5. tech_remarks must NEVER be empty
+5. tech_remarks can be filled with assumptions or notes
 6. ba_remarks is ALWAYS ""
 7. totals.total_hours = sum of ALL owner_hours values across ALL rows
 8. totals.owner_breakdown[col] = sum of that column across all rows

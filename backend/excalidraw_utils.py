@@ -261,6 +261,177 @@ def build_excalidraw_json(diagram: dict) -> dict:
     }
 
 
+# ── PIL render: node/edge diagram → PNG (no CDN, no browser needed) ──────────
+
+def diagram_to_png(diagram: dict, width: int = 1400, height: int = 800) -> bytes | None:
+    """
+    Render a node/edge architecture diagram to PNG using Pillow.
+    No internet or browser required — works in any environment.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        nodes = diagram.get("nodes", [])
+        edges = diagram.get("edges", [])
+        if not nodes:
+            return None
+
+        # ── Layout constants ─────────────────────────────────────────────────
+        BOX_W, BOX_H = 190, 65
+        H_GAP  = 230   # centre-to-centre horizontal spacing
+        V_GAP  = 100   # centre-to-centre vertical spacing
+        MARGIN = 80
+
+        # Group nodes by layer
+        layers: dict[int, list] = {}
+        for n in nodes:
+            layers.setdefault(n.get("layer", 0), []).append(n)
+
+        max_layer    = max(layers.keys()) if layers else 0
+        max_per_col  = max(len(v) for v in layers.values()) if layers else 1
+
+        # Dynamic canvas
+        canvas_w = max(width,  MARGIN * 2 + max_layer * H_GAP + BOX_W)
+        canvas_h = max(height, MARGIN * 2 + (max_per_col - 1) * V_GAP + BOX_H)
+
+        img  = Image.new("RGB", (canvas_w, canvas_h), (248, 250, 252))  # very light grey bg
+        draw = ImageDraw.Draw(img)
+
+        # ── Fonts ─────────────────────────────────────────────────────────────
+        _FONT_PATHS = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ]
+        _FONT_REG_PATHS = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+        def _load_font(paths, size):
+            for p in paths:
+                try:
+                    return ImageFont.truetype(p, size)
+                except Exception:
+                    pass
+            return ImageFont.load_default()
+
+        font_bold  = _load_font(_FONT_PATHS,     13)
+        font_small = _load_font(_FONT_REG_PATHS, 10)
+        font_title = _load_font(_FONT_PATHS,     11)
+
+        # ── Node-type colours ─────────────────────────────────────────────────
+        _TYPE_COLOURS = {
+            "box":      ("#1E3A5F", "#DBEAFE"),
+            "database": ("#065F46", "#D1FAE5"),
+            "decision": ("#92400E", "#FEF3C7"),
+            "circle":   ("#6B21A8", "#EDE9FE"),
+            "cloud":    ("#0369A1", "#E0F2FE"),
+        }
+        _DEFAULT_COLOUR = ("#1E3A5F", "#DBEAFE")
+
+        def _hex(h):
+            h = h.lstrip("#")
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+        # ── Compute node centres ──────────────────────────────────────────────
+        positions: dict[str, tuple] = {}
+        for layer_idx, layer_nodes in sorted(layers.items()):
+            n = len(layer_nodes)
+            total_h = (n - 1) * V_GAP + BOX_H
+            y_start = (canvas_h - total_h) // 2 + BOX_H // 2
+            x_c = MARGIN + BOX_W // 2 + layer_idx * H_GAP
+            for i, node in enumerate(layer_nodes):
+                positions[node["id"]] = (x_c, y_start + i * V_GAP)
+
+        # ── Draw edges ────────────────────────────────────────────────────────
+        _ARROW_CLR = (100, 116, 139)   # slate-500
+
+        def _draw_arrow(x1, y1, x2, y2):
+            draw.line([(x1, y1), (x2, y2)], fill=_ARROW_CLR, width=2)
+            angle  = math.atan2(y2 - y1, x2 - x1)
+            alen, aspread = 14, 0.38
+            for sign in (aspread, -aspread):
+                ax = x2 - alen * math.cos(angle - sign)
+                ay = y2 - alen * math.sin(angle - sign)
+                draw.line([(x2, y2), (int(ax), int(ay))], fill=_ARROW_CLR, width=2)
+
+        for edge in edges:
+            src, dst = edge.get("from"), edge.get("to")
+            if src not in positions or dst not in positions:
+                continue
+            sx, sy = positions[src]
+            dx, dy = positions[dst]
+            # Connect right-edge → left-edge when source is to the left
+            if sx < dx - BOX_W * 0.4:
+                start = (sx + BOX_W // 2, sy)
+                end   = (dx - BOX_W // 2, dy)
+            else:
+                start = (sx, sy + BOX_H // 2)
+                end   = (dx, dy - BOX_H // 2)
+            _draw_arrow(*start, *end)
+            lbl = edge.get("label", "")
+            if lbl:
+                mx = (start[0] + end[0]) // 2
+                my = (start[1] + end[1]) // 2 - 12
+                bbox = draw.textbbox((0, 0), lbl, font=font_small)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                draw.rectangle([mx - tw//2 - 4, my - 2, mx + tw//2 + 4, my + th + 2],
+                               fill=(255, 255, 255))
+                draw.text((mx - tw//2, my), lbl, fill=(100, 116, 139), font=font_small)
+
+        # ── Draw nodes ────────────────────────────────────────────────────────
+        for node in nodes:
+            nid   = node.get("id")
+            label = node.get("label", nid or "")
+            ntype = node.get("type", "box")
+            if nid not in positions:
+                continue
+            cx, cy = positions[nid]
+            x0, y0 = cx - BOX_W // 2, cy - BOX_H // 2
+            x1, y1 = cx + BOX_W // 2, cy + BOX_H // 2
+            stroke_hex, fill_hex = _TYPE_COLOURS.get(ntype, _DEFAULT_COLOUR)
+            stroke_rgb = _hex(stroke_hex)
+            fill_rgb   = _hex(fill_hex)
+
+            draw.rounded_rectangle([x0, y0, x1, y1], radius=10,
+                                   fill=fill_rgb, outline=stroke_rgb, width=2)
+
+            # Word-wrap label into max 2 lines
+            words = label.split()
+            if len(words) <= 1 or len(label) <= 16:
+                lines_lbl = [label]
+            else:
+                mid = max(1, len(words) // 2)
+                lines_lbl = [" ".join(words[:mid]), " ".join(words[mid:])]
+
+            line_h = 16
+            total_text_h = len(lines_lbl) * line_h
+            ty = cy - total_text_h // 2
+            for ln in lines_lbl:
+                bb = draw.textbbox((0, 0), ln, font=font_bold)
+                tw = bb[2] - bb[0]
+                draw.text((cx - tw // 2, ty), ln, fill=stroke_rgb, font=font_bold)
+                ty += line_h
+
+        # ── Legend (layer labels if meaningful) ───────────────────────────────
+        if max_layer >= 2:
+            layer_names = {0: "Client", 1: "Service", 2: "Backend", 3: "Data", 4: "External"}
+            for layer_idx in sorted(layers.keys()):
+                lname = layer_names.get(layer_idx, f"Layer {layer_idx}")
+                x_c = MARGIN + BOX_W // 2 + layer_idx * H_GAP
+                bb = draw.textbbox((0, 0), lname, font=font_small)
+                tw = bb[2] - bb[0]
+                draw.text((x_c - tw // 2, 16), lname, fill=(148, 163, 184), font=font_small)
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", dpi=(150, 150))
+        buf.seek(0)
+        return buf.read()
+
+    except Exception as e:
+        print(f"[Diagram] PIL render failed: {e}")
+        return None
+
+
 # ── Playwright render: Excalidraw JSON → PNG ──────────────────────────────────
 
 _HTML_TEMPLATE = """<!DOCTYPE html>

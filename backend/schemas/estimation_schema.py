@@ -5,14 +5,14 @@ from typing import List, Dict, Optional, Any
 class EstimationRow(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    owner_hours: Dict[str, int] = Field(default_factory=dict)
+    owner_hours: Dict[str, float] = Field(default_factory=dict)
     tech_remarks: str = Field(default="")
     ba_remarks: str = Field(default="")
 
 
 class EstimationTotals(BaseModel):
-    total_hours: int = Field(default=0, ge=0)
-    owner_breakdown: Dict[str, int] = Field(default_factory=dict)
+    total_hours: float = Field(default=0, ge=0)
+    owner_breakdown: Dict[str, float] = Field(default_factory=dict)
 
 
 class EstimationAgentOutput(BaseModel):

@@ -3,12 +3,7 @@ llm_client.py
 -------------
 Unified LLM client with Gemini primary and OpenRouter fallback chain.
 If Gemini API quota/rate-limit is exceeded, automatically falls back
-to OpenRouter models in order:
-  1. openai/gpt-oss-120b
-  2. qwen/qwen3-32b
-  3. moonshotai/kimi-k2.6:free
-  4. google/gemma-4-31b-it:free
-  5. google/gemma-4-26b-a4b-it:free
+through a per-agent chain of confirmed-working free models on OpenRouter.
 
 All calls are traced via Langfuse when configured.
 """
@@ -40,56 +35,72 @@ GEMINI_MODEL = "gemini-2.0-flash"
 #   - default:          safe full chain used for any agent not listed below
 _AGENT_FALLBACKS: dict[str, list[str]] = {
     "task_agent": [
-        "openai/gpt-oss-120b",
-        "deepseek/deepseek-r1:free",
-        "qwen/qwen-2.5-72b-instruct:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
     ],
     "planning_agent": [
-        "openai/gpt-oss-120b",
-        "deepseek/deepseek-r1:free",
-        "qwen/qwen3-32b",
-        "qwen/qwen-2.5-72b-instruct:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
     ],
     "feasibility_agent": [
-        "openai/gpt-oss-120b",
-        "deepseek/deepseek-r1:free",
-        "qwen/qwen-2.5-72b-instruct:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
     ],
     "estimation_agent": [
-        # Must have ≥8192 output tokens — NO llama-3.3 (only 2048)
-        "openai/gpt-oss-120b",
-        "deepseek/deepseek-r1:free",
-        "deepseek/deepseek-chat-v3-0324:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "moonshotai/kimi-k2.6:free",
+        # All have large output caps (32k+) — safe for big JSON responses
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
     ],
     "report_agent": [
-        "openai/gpt-oss-120b",
-        "qwen/qwen3-32b",
-        "deepseek/deepseek-r1:free",
-        "qwen/qwen-2.5-72b-instruct:free",
+        # All have large output caps — safe for long report generation
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
+        "google/gemma-4-31b-it:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
     ],
     "qa_agent": [
-        # Short answers → free models first to save quota
-        "deepseek/deepseek-r1:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "deepseek/deepseek-chat-v3-0324:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "qwen/qwen3-coder:free",
+        "nousresearch/hermes-3-llama-3.1-405b:free",
         "google/gemma-4-31b-it:free",
         "meta-llama/llama-3.3-70b-instruct:free",
     ],
 }
 
-# Default fallback chain used when agent_name is not in _AGENT_FALLBACKS
+# Default fallback chain for any agent not listed above
 FALLBACK_MODELS = [
-    "openai/gpt-oss-120b",
-    "qwen/qwen3-32b",
-    "deepseek/deepseek-r1:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "moonshotai/kimi-k2.6:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openai/gpt-oss-120b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "qwen/qwen3-coder:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
     "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
 ]
 
 
@@ -131,7 +142,13 @@ def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int =
         payload["max_tokens"] = max_tokens
 
     start = time.time()
-    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=300)
+    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=120)
+    if not resp.ok:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        print(f"[OpenRouter] HTTP {resp.status_code} for model '{model}': {body}")
     resp.raise_for_status()
     data = resp.json()
     elapsed = round(time.time() - start, 2)
@@ -267,10 +284,12 @@ def generate_with_fallback(
 
     # Fallback chain through OpenRouter models (agent-specific or default)
     fallback_list = _AGENT_FALLBACKS.get(agent_name, FALLBACK_MODELS)
+    print(f"[LLM] Gemini quota hit for '{agent_name}'. Trying {len(fallback_list)} OpenRouter fallbacks...")
     last_error = None
     for model in fallback_list:
         gen = None
         try:
+            print(f"[LLM] Trying {model} ...")
             gen = active_trace.generation(
                 name=f"{agent_name}:{model.split('/')[0]}",
                 model=model,
@@ -278,11 +297,13 @@ def generate_with_fallback(
                 metadata={"provider": "openrouter", "max_tokens": token_limit},
             )
             result = _call_openrouter(prompt, model=model, generation=gen, max_tokens=token_limit)
+            print(f"[LLM] ✅ {model} succeeded for '{agent_name}'")
             if trace is None:
                 flush()
             return result
         except Exception as e:
             last_error = e
+            print(f"[LLM] ❌ {model} failed: {e}")
             if gen:
                 try:
                     gen.end(level="ERROR", status_message=str(e))

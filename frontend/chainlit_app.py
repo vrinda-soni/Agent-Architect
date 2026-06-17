@@ -667,18 +667,17 @@ async def _show_planning_result(s: dict) -> None:
 
     await cl.Message(content="\n".join(lines)).send()
 
-    # Show architecture diagram — Excalidraw PNG preferred, mermaid fallback
+    # Show architecture diagram — PIL renderer (reliable, no CDN)
     excalidraw_data = getattr(plan, "excalidraw_diagram", None) or {}
     if excalidraw_data.get("nodes"):
         try:
-            from backend.excalidraw_utils import build_excalidraw_json, excalidraw_to_png
-            scene = build_excalidraw_json(excalidraw_data)
-            png_bytes = await asyncio.to_thread(excalidraw_to_png, scene)
+            from backend.excalidraw_utils import diagram_to_png
+            png_bytes = await asyncio.to_thread(diagram_to_png, excalidraw_data)
             if png_bytes:
                 img = cl.Image(name="architecture.png", content=png_bytes, display="inline")
                 await cl.Message(content="**🗺️ Architecture Diagram:**", elements=[img]).send()
         except Exception as _exc:
-            print(f"[Chainlit] Excalidraw render failed: {_exc}")
+            print(f"[Chainlit] diagram render failed: {_exc}")
     elif plan.mermaid_diagram:
         diagram = _sanitize_mermaid(plan.mermaid_diagram)
         await cl.Message(content=f"**🗺️ Architecture Diagram:**\n\n```mermaid\n{diagram}\n```").send()
@@ -772,7 +771,7 @@ async def _show_estimation_step(s: dict) -> None:
 
 
 async def _show_estimation_result(s: dict) -> None:
-    """Mirrors render_estimation_section results block."""
+    """Renders estimation as two focused markdown tables + totals + Excel download."""
     est = s["estimation_output"]
     if isinstance(est, dict):
         from backend.schemas.estimation_schema import EstimationAgentOutput
@@ -782,26 +781,32 @@ async def _show_estimation_result(s: dict) -> None:
         except Exception as e:
             await cl.Message(content=f"⚠️ Could not display estimation — format error: {e}").send()
             return
-    inc_mvp = s["include_mvp"]
-    df      = _build_estimation_df(est, include_mvp=inc_mvp)
 
-    t_data = est.totals if isinstance(est.totals, dict) else est.totals.model_dump()
-    lines = ["### 📋 Effort Estimation Table\n", _df_to_md(df), ""]
-    lines.append(f"**Grand Total: {t_data.get('total_hours', 0)} hrs**")
+    inc_mvp  = s["include_mvp"]
+    df       = _build_estimation_df(est, include_mvp=inc_mvp)
+    t_data   = est.totals if isinstance(est.totals, dict) else est.totals.model_dump()
     owner_bd = t_data.get("owner_breakdown") or {}
+
+    # ── Render as code block (scrollable, proper rows & columns) ─────────────
+    from tabulate import tabulate
+    table_str = tabulate(df.values.tolist(), headers=list(df.columns), tablefmt="simple", numalign="right")
+    await cl.Message(content=f"### 📋 Effort Estimation Table\n\n```\n{table_str}\n```").send()
+
+    # ── Totals ────────────────────────────────────────────────────────────────
+    total_lines = [f"**Grand Total: {t_data.get('total_hours', 0)} hrs**"]
     if owner_bd:
-        breakdown = " | ".join(f"**{owner}:** {hrs} hrs" for owner, hrs in owner_bd.items())
-        lines.append(breakdown)
+        total_lines.append("\n**By Owner:**")
+        for owner, hrs in owner_bd.items():
+            total_lines.append(f"- **{owner}:** {hrs} hrs")
+    await cl.Message(content="\n".join(total_lines)).send()
 
-    await cl.Message(content="\n".join(lines)).send()
-
-    # Excel download via in-memory bytes
+    # ── Excel download ────────────────────────────────────────────────────────
     try:
         xl_buf = io.BytesIO()
         with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Effort Estimation")
         await cl.Message(
-            content="📥 Download estimation:",
+            content="📥 Download full estimation table:",
             elements=[cl.File(
                 name="effort_estimation.xlsx",
                 content=xl_buf.getvalue(),
@@ -941,15 +946,14 @@ async def _show_report_result(s: dict) -> None:
     arch_sent = False
     if excalidraw_data.get("nodes"):
         try:
-            from backend.excalidraw_utils import build_excalidraw_json, excalidraw_to_png
-            scene = build_excalidraw_json(excalidraw_data)
-            png_bytes = await asyncio.to_thread(excalidraw_to_png, scene)
+            from backend.excalidraw_utils import diagram_to_png
+            png_bytes = await asyncio.to_thread(diagram_to_png, excalidraw_data)
             if png_bytes:
                 img = cl.Image(name="architecture.png", content=png_bytes, display="inline")
                 await cl.Message(content="### 07. Solution Architecture", elements=[img]).send()
                 arch_sent = True
         except Exception as _exc:
-            print(f"[Chainlit] Report excalidraw render failed: {_exc}")
+            print(f"[Chainlit] Report diagram render failed: {_exc}")
 
     if not arch_sent:
         # Mermaid fallback
@@ -1322,20 +1326,36 @@ async def on_new_project(action: cl.Action):
 
 @cl.action_callback("resume_pipeline")
 async def on_resume_pipeline(action: cl.Action):
-    """Jump to the furthest completed stage when restoring from DB."""
+    """Replay all completed stage outputs in order, then land at the pending action."""
     s = _state()
-    if s.get("approved_estimation"):
-        await _show_report_step(s)
-    elif s.get("estimation_output"):
-        await _show_estimation_result(s)
-        await _show_hitl3(s)
-    elif s.get("feasibility_output"):
-        await _show_planning_result(s)
-        await _show_feasibility_result(s)
-        await _show_hitl2(s)
-    elif s.get("task_output"):
+
+    has_task    = bool(s.get("task_output"))
+    has_plan    = bool(s.get("plan_output"))
+    has_feas    = bool(s.get("feasibility_output"))
+    has_est     = bool(s.get("estimation_output"))
+    has_app_est = bool(s.get("approved_estimation"))
+
+    # ── Replay every completed stage so the user sees the full history ────────
+    if has_task:
         await _show_hitl1(s)
-    else:
+
+    if has_plan:
+        await _show_planning_result(s)
+
+    if has_feas:
+        await _show_feasibility_result(s)
+
+    if has_est:
+        await _show_estimation_result(s)
+
+    # ── Land at the current pending action ────────────────────────────────────
+    if has_app_est:
+        await _show_report_step(s)
+    elif has_est:
+        await _show_hitl3(s)
+    elif has_feas or has_plan:
+        await _show_hitl2(s)
+    elif not has_task:
         await _show_transcript_step(s["selected_project"], s)
 
 
@@ -1644,6 +1664,7 @@ async def on_run_estimation(action: cl.Action):
         except Exception:
             pass
 
+    msg_working = await cl.Message(content="⏳ Running Estimation Agent — this may take 2–5 minutes on free models...").send()
     async with cl.Step(name="Estimation Agent", type="tool") as step:
         step.input = "Generating Work Breakdown Structure & effort estimates..."
         try:
