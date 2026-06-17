@@ -519,6 +519,7 @@ async def _show_transcript_step(project: dict, s: dict) -> None:
                 cl.Action(name="use_existing_transcript", payload={}, label="✅ Use This Transcript"),
                 cl.Action(name="upload_new_transcript",   payload={}, label="📤 Replace with New File"),
                 cl.Action(name="paste_new_transcript",    payload={}, label="📝 Replace with Paste"),
+                cl.Action(name="delete_transcript",       payload={"project_id": pid}, label="🗑️ Delete Transcript"),
             ],
         ).send()
     else:
@@ -538,13 +539,18 @@ async def _show_transcript_step(project: dict, s: dict) -> None:
         ref_docs = list_project_documents(pid)
         if ref_docs:
             doc_list = "\n".join(f"- 📎 {d['document_name']}" for d in ref_docs)
+            delete_actions = [
+                cl.Action(name="delete_ref_doc", payload={"doc_name": d["document_name"], "project_id": pid}, label=f"🗑️ {d['document_name']}")
+                for d in ref_docs
+            ]
             await cl.Message(
                 content=(
                     f"**📚 Reference Documents** *(optional — already indexed for this project)*:\n{doc_list}\n\n"
-                    f"These give agents extra context. You can add more or skip."
+                    f"These give agents extra context. You can add more, or delete individual docs below."
                 ),
                 actions=[
                     cl.Action(name="upload_ref_docs", payload={}, label="➕ Add More Reference Docs"),
+                    *delete_actions,
                 ],
             ).send()
         else:
@@ -1232,6 +1238,37 @@ async def _process_transcript_file(s: dict, file_el) -> None:
         await cl.Message(content=f"❌ Failed to process file: {e}").send()
 
 
+async def _process_multiple_transcript_files(s: dict, files: list) -> None:
+    """Extract text from multiple files and concatenate into one transcript."""
+    parts = []
+    for f in files:
+        try:
+            path = getattr(f, "path", None)
+            raw  = getattr(f, "content", None)
+            if path:
+                with open(path, "rb") as fp:
+                    content = fp.read()
+            elif raw:
+                content = raw if isinstance(raw, bytes) else raw.encode()
+            else:
+                await cl.Message(content=f"⚠️ Could not read {getattr(f, 'name', 'file')} — skipped.").send()
+                continue
+            name = getattr(f, "name", "file.txt")
+            ext  = name.rsplit(".", 1)[-1].lower() if "." in name else "txt"
+            text = await asyncio.to_thread(extract_text, content, ext)
+            if text.strip():
+                parts.append(f"--- {name} ---\n{text.strip()}")
+        except Exception as e:
+            await cl.Message(content=f"⚠️ Failed to read {getattr(f, 'name', 'file')}: {e} — skipped.").send()
+
+    if not parts:
+        await cl.Message(content="❌ No text could be extracted from the uploaded files.").send()
+        return
+    combined = "\n\n".join(parts)
+    await cl.Message(content=f"✅ Merged {len(parts)} file(s) into one transcript ({len(combined):,} chars).").send()
+    await _save_transcript_text(s, combined)
+
+
 async def _handle_rag_upload(s: dict) -> None:
     project = s["selected_project"]
     try:
@@ -1246,8 +1283,12 @@ async def _handle_rag_upload(s: dict) -> None:
 
     files = await cl.AskFileMessage(
         content="📤 Upload reference documents (PDF, DOCX, or TXT) to enrich AI context:",
-        accept=["*/*"],
+        accept=["application/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+                "text/plain", "text/markdown", "text/csv"],
         max_files=5,
+        max_size_mb=100,
         timeout=120,
     ).send()
 
@@ -1387,19 +1428,60 @@ async def on_use_existing_transcript(action: cl.Action):
     await _show_task_agent_step(s)
 
 
+@cl.action_callback("delete_transcript")
+async def on_delete_transcript(action: cl.Action):
+    s = _state()
+    pid = action.payload.get("project_id") or (s.get("selected_project") or {}).get("id")
+    try:
+        db.supabase.table("transcripts").delete().eq("project_id", pid).execute()
+        s["current_transcript"] = ""
+        s["task_output"] = None
+        s["approved_requirements"] = None
+        _reset_pipeline(s)
+        _save(s)
+        await cl.Message(content="🗑️ Transcript deleted. You can upload a new one:").send()
+        await _show_transcript_step(s["selected_project"], s)
+    except Exception as e:
+        await cl.Message(content=f"❌ Failed to delete transcript: {e}").send()
+
+
+@cl.action_callback("delete_ref_doc")
+async def on_delete_ref_doc(action: cl.Action):
+    s = _state()
+    doc_name = action.payload.get("doc_name")
+    pid      = action.payload.get("project_id") or (s.get("selected_project") or {}).get("id")
+    if not doc_name or not pid:
+        await cl.Message(content="❌ Could not identify document to delete.").send()
+        return
+    try:
+        from backend.rag.ingestion import delete_project_documents
+        delete_project_documents(pid, doc_name)
+        await cl.Message(content=f"🗑️ **{doc_name}** deleted from reference docs.").send()
+        await _show_transcript_step(s["selected_project"], s)
+    except Exception as e:
+        await cl.Message(content=f"❌ Failed to delete {doc_name}: {e}").send()
+
+
 @cl.action_callback("upload_new_transcript")
 async def on_upload_new_transcript(action: cl.Action):
     s = _state()
     files = await cl.AskFileMessage(
-        content="📤 Upload your transcript (PDF, DOCX, or TXT):",
-        accept=["*/*"],
-        max_files=1,
+        content="📤 Upload transcript file(s) — PDF, DOCX, or TXT, up to 100 MB each. Multiple files will be merged:",
+        accept=["application/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+                "text/plain", "text/markdown", "text/csv"],
+        max_files=5,
+        max_size_mb=100,
         timeout=120,
     ).send()
-    if files:
+    if not files:
+        await cl.Message(content="No file received. Try again.").send()
+        return
+    if len(files) == 1:
         await _process_transcript_file(s, files[0])
     else:
-        await cl.Message(content="No file received. Try again.").send()
+        await _process_multiple_transcript_files(s, files)
 
 
 @cl.action_callback("paste_new_transcript")
@@ -1724,14 +1806,21 @@ async def on_hitl3_regen(action: cl.Action):
     async with cl.Step(name="Estimation Agent (Regenerate)", type="tool") as step:
         step.input = f"Feedback: {feedback or 'none'}"
         try:
+            rag_context = ""
+            if pid:
+                try:
+                    chunks = await asyncio.to_thread(partial(_retrieve_context, pid, "effort estimation work breakdown structure", 5))
+                    rag_context = _format_context(chunks)
+                except Exception:
+                    pass
             result = await asyncio.to_thread(partial(
-                call_estimation_agent,
+                run_estimation_agent,
                 s["approved_requirements"],
                 _to_dict(s["plan_output"]),
                 _to_dict(s["feasibility_output"]),
-                project_id=pid,
                 transcript=s.get("current_transcript", ""),
                 include_mvp=inc_mvp,
+                rag_context=rag_context,
                 feedback=feedback,
             ))
             s["estimation_output"] = result
