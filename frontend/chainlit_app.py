@@ -433,22 +433,20 @@ Question: {search_query}"""
         lines.append("[END OF HISTORY]")
         history_block = "\n".join(lines)
 
-    lang_instruction = (
-        f"IMPORTANT: The user asked in {detected_language}. You MUST respond in {detected_language}."
-        if detected_language.lower() != "english"
-        else ""
-    )
+    lang_instruction = "Always respond in English regardless of the language of the question."
 
-    prompt = f"""You are an AI assistant answering questions about a software project analysis for "{proj_name}".
+    prompt = f"""You are a helpful AI assistant for a software project analysis tool, working on the project "{proj_name}".
 {lang_instruction}
 
-{context if context else "(No indexed documents found — answer from general knowledge.)"}
+You can answer both project-specific questions (using the documents below) and general conversational messages (greetings, thanks, etc.) naturally — do not refuse to respond to simple conversation.
+
+{context if context else "(No project documents indexed yet.)"}
 
 {history_block}
 
-Current question: {question}
+Current message: {question}
 
-Answer concisely and accurately, taking the conversation history into account for any follow-up references. Reference specific sections from the documents when possible. If the answer is not in the documents, say so clearly. {lang_instruction}"""
+If it is a greeting or casual message, respond warmly and naturally. If it is a project question, answer concisely and accurately using the documents above. Reference specific sections when possible. Always respond in English."""
 
     async with cl.Step(name="Generating Answer", type="llm") as step:
         step.input = question
