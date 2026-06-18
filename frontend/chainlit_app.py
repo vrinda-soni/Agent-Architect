@@ -28,6 +28,7 @@ from backend.report_generator import generate_docx, generate_pdf, generate_json,
 from backend.rag.ingestion import ingest_document, list_project_documents, extract_text
 from backend.rag.retrival import retrieve_context, format_context_for_prompt
 from backend.llm_client import generate_with_fallback
+from backend.rag.cache import search_cache, store_cache
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -360,48 +361,101 @@ async def _ingest_to_rag(project_id: str, text: str, doc_name: str, doc_type: st
 
 _QA_HISTORY_LIMIT = 6  # keep last 6 turns (3 Q&A pairs) in the prompt
 
-async def _qa_answer(s: dict, question: str) -> None:
-    """Retrieve context from Supabase and answer a Q&A question with conversation history."""
-    project_id = (s["selected_project"] or {}).get("id", "")
-    proj_name  = (s["selected_project"] or {}).get("name", "this project")
+_SMALL_TALK_PATTERNS = {
+    "hi", "hey", "hello", "hii", "helo", "heya", "howdy",
+    "thanks", "thank you", "thankyou", "thx", "ty",
+    "ok", "okay", "got it", "sure", "cool", "great", "nice", "awesome",
+    "bye", "goodbye", "see you", "later",
+    "how are you", "how r u", "whats up", "what's up", "sup",
+    "who are you", "what are you", "what can you do",
+    "good morning", "good evening", "good afternoon", "good night",
+    "yes", "no", "yep", "nope", "yup",
+}
 
+def _is_small_talk(text: str) -> bool:
+    """Return True if the message is a greeting or casual small talk that needs no RAG."""
+    t = text.strip().lower().rstrip("!?.").strip()
+    if t in _SMALL_TALK_PATTERNS:
+        return True
+    # Very short messages (≤ 4 words) with no project-related keywords
+    words = t.split()
+    if len(words) <= 4:
+        project_keywords = {"what", "how", "why", "when", "where", "which", "who",
+                            "show", "list", "explain", "tell", "describe", "give",
+                            "requirement", "feature", "module", "risk", "estimation",
+                            "architecture", "plan", "feasibility", "report", "tech", "stack"}
+        if not any(w in project_keywords for w in words):
+            return True
+    return False
+
+
+async def _qa_answer(s: dict, question: str) -> None:
+    """Answer Q&A questions — skips RAG for greetings/small talk, full pipeline for real questions."""
+    proj_name  = (s["selected_project"] or {}).get("name", "this project")
+    project_id = (s["selected_project"] or {}).get("id", "")
+    history    = s.get("qa_history") or []
+
+    def _history_block() -> str:
+        if not history:
+            return ""
+        lines = ["[CONVERSATION HISTORY]"]
+        for turn in history[-_QA_HISTORY_LIMIT:]:
+            lines.append(f"User: {turn['q']}")
+            lines.append(f"Assistant: {turn['a']}")
+        lines.append("[END OF HISTORY]")
+        return "\n".join(lines)
+
+    # ── Fast path: small talk / greetings — no RAG, no query expansion ────────
+    if _is_small_talk(question):
+        prompt = (
+            f"You are a helpful assistant for the project \"{proj_name}\". "
+            f"The user sent a casual message. Reply naturally and briefly.\n\n"
+            f"{_history_block()}\n\nUser: {question}"
+        )
+        try:
+            answer = await asyncio.to_thread(partial(generate_with_fallback, prompt, agent_name="qa_agent"))
+        except Exception as e:
+            answer = f"❌ {e}"
+        history.append({"q": question, "a": answer})
+        s["qa_history"] = history
+        _save(s)
+        await cl.Message(content=answer).send()
+        return
+
+    # ── Full path: real project question ──────────────────────────────────────
     if not project_id:
         await cl.Message(content="❌ No project selected — cannot search project documents.").send()
         return
 
-    # Detect language and translate query to English for retrieval
-    lang_prompt = f"""Detect the language of this text and if it is not English, translate it to English.
-Return a JSON object with two keys: "language" (the detected language name in English, e.g. "Hindi", "English", "Spanish") and "english_query" (the English translation, or the original if already English).
-Text: {question}
-Return only valid JSON, no markdown."""
-    try:
-        lang_raw = await asyncio.to_thread(partial(generate_with_fallback, lang_prompt, agent_name="lang_detect"))
-        import json as _json
-        lang_data = _json.loads(lang_raw.strip().strip("```json").strip("```").strip())
-        detected_language = lang_data.get("language", "English")
-        search_query = lang_data.get("english_query", question)
-    except Exception:
-        detected_language = "English"
-        search_query = question
+    # ── Semantic cache check — return instantly if similar question was answered before ──
+    cached = await asyncio.to_thread(search_cache, project_id, question)
+    if cached:
+        await cl.Message(content=cached).send()
+        history.append({"q": question, "a": cached})
+        s["qa_history"] = history
+        _save(s)
+        return
 
-    # Generate multiple search angles to handle paraphrased/conceptually similar questions
-    expand_prompt = f"""Generate 3 different search queries to retrieve relevant information for this question from a software project document.
-Each query should approach the topic from a different angle (direct, conceptual, keyword-focused).
-Return only a JSON array of 3 strings. No explanation, no markdown.
-Question: {search_query}"""
+    # Query expansion — 2 extra angles for better recall
+    import json as _json
+    expand_prompt = (
+        f"Generate 3 different search queries to retrieve relevant information for this question "
+        f"from a software project document. Approach the topic from different angles "
+        f"(direct, conceptual, keyword-focused). Return only a JSON array of 3 strings. "
+        f"No explanation, no markdown.\nQuestion: {question}"
+    )
     try:
         expand_raw = await asyncio.to_thread(partial(generate_with_fallback, expand_prompt, agent_name="query_expander"))
-        import json as _json2
-        extra_queries = _json2.loads(expand_raw.strip().strip("```json").strip("```").strip())
+        extra_queries = _json.loads(expand_raw.strip().strip("```json").strip("```").strip())
         if not isinstance(extra_queries, list):
             extra_queries = []
     except Exception:
         extra_queries = []
-    all_queries = [search_query] + extra_queries[:2]  # original + 2 extras
+    all_queries = [question] + extra_queries[:2]
 
-    # Retrieve relevant chunks using all query angles, deduplicate by chunk id
+    # RAG retrieval across all query angles
     async with cl.Step(name="Searching Documents", type="retrieval") as step:
-        step.input = search_query
+        step.input = question
         try:
             seen_ids: set = set()
             merged_chunks: list = []
@@ -412,7 +466,6 @@ Question: {search_query}"""
                     if cid not in seen_ids:
                         seen_ids.add(cid)
                         merged_chunks.append(c)
-            # Sort by similarity descending (best first), keep top 10
             merged_chunks.sort(key=lambda x: x.get("similarity", 0), reverse=True)
             chunks = merged_chunks[:10]
             context = format_context_for_prompt(chunks)
@@ -422,31 +475,14 @@ Question: {search_query}"""
             context = ""
             step.output = f"Retrieval failed: {e}"
 
-    # Build conversation history block (last N turns)
-    history = s.get("qa_history") or []
-    history_block = ""
-    if history:
-        lines = ["[CONVERSATION HISTORY]"]
-        for turn in history[-_QA_HISTORY_LIMIT:]:
-            lines.append(f"User: {turn['q']}")
-            lines.append(f"Assistant: {turn['a']}")
-        lines.append("[END OF HISTORY]")
-        history_block = "\n".join(lines)
-
-    lang_instruction = "Always respond in English regardless of the language of the question."
-
-    prompt = f"""You are a helpful AI assistant for a software project analysis tool, working on the project "{proj_name}".
-{lang_instruction}
-
-You can answer both project-specific questions (using the documents below) and general conversational messages (greetings, thanks, etc.) naturally — do not refuse to respond to simple conversation.
-
-{context if context else "(No project documents indexed yet.)"}
-
-{history_block}
-
-Current message: {question}
-
-If it is a greeting or casual message, respond warmly and naturally. If it is a project question, answer concisely and accurately using the documents above. Reference specific sections when possible. Always respond in English."""
+    prompt = (
+        f"You are an AI assistant answering questions about the software project \"{proj_name}\".\n\n"
+        f"{context if context else '(No indexed documents found — answer from general knowledge.)'}\n\n"
+        f"{_history_block()}\n\n"
+        f"Question: {question}\n\n"
+        f"Answer concisely and accurately. Reference specific sections from the documents when possible. "
+        f"If the answer is not in the documents, say so clearly."
+    )
 
     async with cl.Step(name="Generating Answer", type="llm") as step:
         step.input = question
@@ -457,12 +493,14 @@ If it is a greeting or casual message, respond warmly and naturally. If it is a 
             answer = f"❌ Failed to generate answer: {e}"
             step.output = str(e)
 
-    # Persist this turn to history
     history.append({"q": question, "a": answer})
     s["qa_history"] = history
     _save(s)
-
     await cl.Message(content=answer).send()
+
+    # Store in semantic cache for future similar questions (fire-and-forget)
+    if not answer.startswith("❌"):
+        _bg(asyncio.to_thread(store_cache, project_id, question, answer))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,155 @@
+# Project Consulting Report
+
+_Generated on 2026-06-19 00:57_
+
+---
+
+## 1. Executive Summary
+
+The project aims to deliver an Azure‑based serverless web application that provides AI‑driven role‑play training for sales associates. The solution will enable on‑demand practice during lull periods, capture performance scores, and deliver reporting to drive attach‑rate improvements. Key decisions include using Azure OpenAI for the conversational engine, Azure AD B2C for secure multi‑tenant authentication, and a lean MVP architecture that avoids over‑engineering while retaining IP ownership for future partner roll‑outs. The recommendation is to proceed with the proposed MVP, leveraging the outlined Azure services to meet the budget, timeline, and scalability requirements.
+
+---
+
+## 2. Background Summary
+
+The client currently relies on a single trainer to support 135 stores, resulting in limited training capacity, inconsistent role‑play experiences, and insufficient feedback for managers. Existing processes lack real‑time practice opportunities and detailed performance analytics, leading to missed upsell potential during sales floor lull periods.
+
+---
+
+## 3. Problem / Need Analysis
+
+| Problem / Need | Business Impact |
+| --- | --- |
+| Limited training capacity due to being only one person responsible for 135 accounts | Inability to scale training across stores, leading to lower sales performance and missed revenue opportunities. |
+| Inconsistent role-play training because stores are thinly staffed and managers are asked to do 100 things | Variable skill development among associates, resulting in uneven customer experiences and reduced attach rates. |
+| Sales associates lack time for consistent role‑playing practice as they must get right on the floor | Lost learning moments and slower skill acquisition, impacting sales effectiveness. |
+| Missed opportunity to use lull periods on sales floor for training | Underutilized downtime translates to lower overall productivity and fewer training interactions. |
+| Current training frequency is insufficient ('not done often enough') | Skills decay over time, reducing the ability to consistently upsell high‑margin products. |
+| Lack of detailed feedback/transcripts for coaching and manager oversight | Managers cannot pinpoint performance gaps, limiting targeted coaching and improvement. |
+| Need for manager validation of AI scoring accuracy since 'the AI is not an expert like you' | Potential loss of trust in the system and reduced adoption if scores are perceived as inaccurate. |
+| Desire to avoid building an elaborate solution that won't get used or buy‑in | Risk of wasted investment and low user adoption, jeopardizing ROI. |
+| Uncertainty about current cloud provider hindering technology strategy decisions | Delays in procurement and architecture decisions, impacting schedule. |
+| Need to evaluate build vs. buy/white label options before making investment decision | Potential for cost overruns or missed market timing if the wrong approach is chosen. |
+
+---
+
+## 4. Requirements Analysis
+
+### Functional Requirements
+
+| ID | Requirement |
+| --- | --- |
+| FR-001 | AI-powered conversational platform for sales role-play training |
+| FR-002 | Enable sales associates to practice role-playing scenarios during lull periods |
+| FR-003 | Track practice frequency and consistency of training usage |
+| FR-004 | Provide scoring system for role-play performance improvement |
+| FR-005 | Ability to upload training content including brochure data, PowerPoint presentations, and sales pitches |
+| FR-006 | Knowledge base that can be updated periodically (monthly/bi-monthly) |
+| FR-007 | Reporting capabilities for individual sales associate and store-level performance metrics |
+| FR-008 | Track attach rates (ESP upsell) as primary effectiveness metric |
+| FR-009 | Support multiple difficulty levels for different users |
+
+### Non-Functional Requirements
+
+| Category | Requirement |
+| --- | --- |
+| Performance | Low latency interaction for real‑time voice and text responses during brief practice sessions |
+| Security | Azure AD B2C authentication with role‑based access control and data encryption at rest and in transit |
+| Scalability | Serverless components that automatically scale to support peak usage across multiple partner accounts |
+| Availability | 99.9% uptime SLA using managed Azure services |
+| Maintainability | Modular architecture with CI/CD pipelines for rapid updates and easy duplication across partner tenants |
+
+### Constraints
+
+| Constraint |
+| --- |
+| Budget range of $500K-$800K mentioned as 'a good budget like 500 to 100, 800 K' |
+| Timeline: Test market by end of June, official rollout in Q4 (October timeframe) |
+| No POS integration for initial POC - manual comparison will be made for effectiveness measurement |
+| Explicit goal to 'keep the cost down' for the solution |
+| Requirement for proof of concept before full investment to avoid building unused elaborate solution |
+| Need to evaluate build vs. buy/white label options for cost comparison |
+| Target to present proposals to management for decision by end of next week |
+| Currently uncertain about cloud provider (AWS or other) requiring discovery |
+| Preference for lean/basic MVP: 'Nothing elaborate and just basic' |
+| Avoid over-engineering that wouldn't get user buy-in or adoption |
+| Requirement for duplicatable solution across partner accounts: 'hey, it works in this account, let's duplicate the same thing in the other account' |
+| Need for IP rights to market/sell solution to potential partners: 'we are looking for only the IP so we could, you know, be able to market it to our potential partners' |
+| Plan to start with basic model and add partner-specific features: 'only difference would be if the particular partner would want some additional features' |
+
+### Business Goals
+
+
+
+### Technology Context
+
+| Technology Context |
+| --- |
+| Preferred Cloud: Azure |
+
+---
+
+## 5. Assumptions
+
+| Assumption |
+| --- |
+| Azure subscription is available and provisioned. |
+| Client will provide API credentials for 11 Labs voice service and Azure OpenAI. |
+| Existing infrastructure (POS, ERP) will remain unchanged during the POC phase. |
+| User base will consist of sales associates and managers with Azure AD B2C identities. |
+| Data residency requirements are satisfied by Azure regional services. |
+
+---
+
+## 6. Feature & Module Breakdown
+
+| Module | Feature / Functionality | Technologies Used |
+| --- | --- | --- |
+| Frontend | SPA for scenario selection, conversation UI, score display | Azure Static Web Apps |
+| Backend API | Orchestrates AI calls, scoring, session persistence | Azure App Service (Standard S1) |
+| Authentication | Secure multi‑tenant sign‑in and token issuance | Azure Active Directory B2C |
+| Database | Stores user profiles, transcripts, scores | Azure SQL Database (serverless) |
+| Content Storage | Holds training materials (PDF, PPT, images) | Azure Blob Storage |
+| AI Engine | Generates conversational responses | Azure OpenAI Service (GPT‑4) |
+| Voice Service | Text‑to‑speech for AI replies | 11 Labs API |
+| Integration Layer | Exports metrics to existing attach‑rate reporting system | Azure Logic Apps |
+| DevOps / CI‑CD | Automated build, test, and release pipelines | Azure DevOps Pipelines |
+| Analytics & Reporting | Telemetry, practice frequency, scoring dashboards | Azure Application Insights + Azure Data Explorer |
+
+---
+
+## 7. Solution Architecture
+
+_Architecture diagram not available._
+
+---
+
+## 8. Feasibility Assessment
+
+| Metric | Value | Reason |
+| --- | --- | --- |
+| Complexity | Medium | Architecture is moderately complex but manageable with Azure managed services. |
+| Architecture Confidence | Medium | Selected services align with requirements; minor over‑engineering elements identified. |
+| Feasibility Confidence | Medium | Budget and timeline achievable if cost‑heavy components are simplified. |
+
+---
+
+## 9. Risk Assessment
+
+| Risk | Impact | Mitigation Strategy |
+| --- | --- | --- |
+| Azure Data Explorer and Azure App Service Standard S1 may lead to excessive operational costs during the test phase, potentially exceeding the $500K-$800K budget. | Budget overrun could jeopardize the project's approval for full rollout and limit funds for future enhancements. | Replace Azure Data Explorer with a cost-effective analytics pipeline using Application Insights export to Azure Blob Storage and Azure Synapse serverless for querying. Shift the backend to Azure Functions (Consumption plan) to eliminate fixed costs and scale to zero during idle periods. |
+| The architecture lacks a defined scoring mechanism for role-play performance and a manager interface for validating AI scores and reviewing transcripts, which are explicit requirements. | Without these features, the solution cannot meet the core objectives of providing performance improvement tracking and manager oversight, reducing its effectiveness and adoption. | Define a clear scoring rubric in the API backend that evaluates user responses against scenario objectives. Develop a simple manager dashboard (using Azure Static Web Apps or Power BI) to view session transcripts, AI scores, and provide manual feedback or overrides. |
+| Dependency on third-party voice service (11 Labs) introduces latency and cost variability risks, which could degrade user experience during brief sales floor lull periods and lead to unexpected expenses. | High latency may make the tool impractical for quick practice sessions, while variable usage could cause costs to spiral, undermining the cost-effectiveness goal. | Implement response caching for common AI utterances to reduce 11 Labs calls. Set up usage monitoring with automatic alerts for cost and latency thresholds. Evaluate Azure Cognitive Services Text-to-Speech as a lower-cost, lower-latency fallback option. |
+
+---
+
+## 10. Recommendations & Next Steps
+
+Begin immediately with environment provisioning and technology validation to meet the end‑of‑June test market deadline. Assemble a cross‑functional delivery team (DevOps, Backend, Frontend, AI/ML, Security, Integration) with clear ownership per the effort breakdown. Deliver an MVP that includes core scenario playback, scoring, and basic manager review within 8 weeks, followed by a short pilot in selected stores. Collect usage and cost metrics, then iterate to replace high‑cost components and finalize the scoring manager UI before the Q4 official rollout. Parallelly, prepare a build‑vs‑buy analysis document for senior management by next week and establish IP ownership agreements for partner replication.
+
+---
+
+## 11. Architecture Summary
+
+The Azure‑centric serverless architecture was chosen because it delivers rapid development, automatic scaling, and aligns with the client’s preference for Azure while keeping operational costs low. Managed services such as Azure OpenAI, Azure AD B2C, and Azure SQL provide the required AI capabilities, secure authentication, and data persistence without extensive infrastructure management. This design satisfies functional needs for real‑time role‑play, scoring, and reporting, and meets non‑functional goals of performance, security, and scalability, while preserving IP for future white‑label expansion across partner accounts.
