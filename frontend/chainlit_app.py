@@ -198,29 +198,16 @@ def _build_estimation_df(estimation, include_mvp: bool = False) -> pd.DataFrame:
         except Exception:
             return pd.DataFrame({"Error": ["Invalid estimation format"]})
     struct_cols = estimation.structural_columns or []
-    owner_cols  = estimation.owner_columns or []
     rows = []
-    for item in estimation.estimations:
+    for item in estimation.work_breakdown:
         data = item if isinstance(item, dict) else item.model_dump(warnings=False)
         row = {col: data.get(col, "") for col in struct_cols}
-        owner_hours = data.get("owner_hours") or {}
-        for col in owner_cols:
-            row[f"{col} (hrs)"] = owner_hours.get(col, 0)
+        owners = data.get("owners") or []
+        row["Owners"] = ", ".join(owners) if isinstance(owners, list) else str(owners)
         row["Tech Remarks"] = data.get("tech_remarks", "")
         row["BA Remarks"]   = ""
         rows.append(row)
-    # Totals row
-    t_data = estimation.totals if isinstance(estimation.totals, dict) else estimation.totals.model_dump()
-    totals_row = {col: "" for col in struct_cols}
-    if len(struct_cols) > 1:
-        totals_row[struct_cols[1]] = "TOTALS"
-    owner_bd = t_data.get("owner_breakdown") or {}
-    for col in owner_cols:
-        totals_row[f"{col} (hrs)"] = owner_bd.get(col, 0)
-    totals_row["Tech Remarks"] = f"Grand Total: {t_data.get('total_hours', 0)} hrs"
-    totals_row["BA Remarks"]   = ""
-    rows.append(totals_row)
-    all_cols = struct_cols + [f"{c} (hrs)" for c in owner_cols] + ["Tech Remarks", "BA Remarks"]
+    all_cols = struct_cols + ["Owners", "Tech Remarks", "BA Remarks"]
     return pd.DataFrame(rows, columns=all_cols)
 
 
@@ -324,25 +311,18 @@ def _feasibility_output_to_text(output) -> str:
 
 
 def _estimation_output_to_text(estimation) -> str:
-    lines = ["=== Effort Estimation — Work Breakdown Structure ==="]
+    lines = ["=== Work Breakdown Structure ==="]
     struct_cols = estimation.structural_columns or []
-    owner_cols  = estimation.owner_columns or []
-    for item in estimation.estimations:
+    for item in estimation.work_breakdown:
         data = item if isinstance(item, dict) else item.model_dump(warnings=False)
         parts = [str(data.get(col, "")) for col in struct_cols if data.get(col)]
-        owner_hours = data.get("owner_hours") or {}
-        for col in owner_cols:
-            hrs = owner_hours.get(col, 0)
-            if hrs:
-                parts.append(f"{col}: {hrs} hrs")
+        owners = data.get("owners") or []
+        if owners:
+            parts.append(f"Owners: {', '.join(owners) if isinstance(owners, list) else owners}")
         remarks = data.get("tech_remarks", "")
         if remarks:
             parts.append(f"Notes: {remarks}")
         lines.append("- " + " | ".join(p for p in parts if p))
-    t_data = estimation.totals if isinstance(estimation.totals, dict) else estimation.totals.model_dump()
-    lines.append(f"\n=== Totals ===\nGrand Total: {t_data.get('total_hours', 0)} hrs")
-    for owner, hrs in (t_data.get("owner_breakdown") or {}).items():
-        lines.append(f"  {owner}: {hrs} hrs")
     return "\n".join(lines)
 
 
@@ -826,21 +806,11 @@ async def _show_estimation_result(s: dict) -> None:
 
     inc_mvp  = s["include_mvp"]
     df       = _build_estimation_df(est, include_mvp=inc_mvp)
-    t_data   = est.totals if isinstance(est.totals, dict) else est.totals.model_dump()
-    owner_bd = t_data.get("owner_breakdown") or {}
 
     # ── Render as code block (scrollable, proper rows & columns) ─────────────
     from tabulate import tabulate
     table_str = tabulate(df.values.tolist(), headers=list(df.columns), tablefmt="simple", numalign="right")
-    await cl.Message(content=f"### 📋 Effort Estimation Table\n\n```\n{table_str}\n```").send()
-
-    # ── Totals ────────────────────────────────────────────────────────────────
-    total_lines = [f"**Grand Total: {t_data.get('total_hours', 0)} hrs**"]
-    if owner_bd:
-        total_lines.append("\n**By Owner:**")
-        for owner, hrs in owner_bd.items():
-            total_lines.append(f"- **{owner}:** {hrs} hrs")
-    await cl.Message(content="\n".join(total_lines)).send()
+    await cl.Message(content=f"### 📋 Work Breakdown Structure\n\n```\n{table_str}\n```").send()
 
     # ── Excel download ────────────────────────────────────────────────────────
     try:
@@ -1050,14 +1020,16 @@ async def _show_report_result(s: dict) -> None:
             except Exception:
                 est_obj = None
     if est_obj:
-        t_data   = est_obj.totals if isinstance(est_obj.totals, dict) else est_obj.totals.model_dump()
-        t_total  = t_data.get("total_hours", 0)
-        owner_bd = t_data.get("owner_breakdown") or {}
-        est_lines = ["### 📊 Effort Estimation Summary\n", f"**Grand Total: {t_total} hrs**"]
-        if owner_bd:
-            est_lines.append("\n**By Owner:**")
-            for owner, hrs in owner_bd.items():
-                est_lines.append(f"- **{owner}:** {hrs} hrs")
+        wbs = est_obj.work_breakdown or []
+        all_owners = []
+        for item in wbs:
+            data = item if isinstance(item, dict) else item.model_dump(warnings=False)
+            for o in (data.get("owners") or []):
+                if o not in all_owners:
+                    all_owners.append(o)
+        est_lines = ["### 📊 Work Breakdown Summary\n", f"**Total work items: {len(wbs)}**"]
+        if all_owners:
+            est_lines.append(f"\n**Delivery streams:** {', '.join(all_owners)}")
         await cl.Message(content="\n".join(est_lines)).send()
 
     # ── Downloads ─────────────────────────────────────────────────────────────
@@ -1800,7 +1772,7 @@ async def on_run_estimation(action: cl.Action):
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            step.output = f"Total: {result.totals.total_hours} hrs across {len(result.estimations)} items"
+            step.output = f"Generated {len(result.work_breakdown)} work items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation Agent failed: {e}").send()
@@ -1864,8 +1836,7 @@ async def on_hitl3_regen(action: cl.Action):
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            t_data = result.totals.model_dump()
-            step.output = f"Total: {t_data.get('total_hours', 0)} hrs"
+            step.output = f"Generated {len(result.work_breakdown)} work items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation regeneration failed: {e}").send()

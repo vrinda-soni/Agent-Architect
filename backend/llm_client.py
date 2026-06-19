@@ -25,7 +25,14 @@ if GEMINI_API_KEY:
     _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 GEMINI_MODEL = "gemini-2.0-flash"
+
+# Mistral model to use as the first fallback for specific agents
+_AGENT_MISTRAL_MODEL: dict[str, str] = {
+    "estimation_agent": "mistral-medium-2505",
+}
 
 # Per-agent fallback chains.
 # Rules:
@@ -178,6 +185,61 @@ def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int =
 
 
 # -----------------------------------------------------------------
+# Mistral call (direct API)
+# -----------------------------------------------------------------
+def _call_mistral(prompt: str, model: str, generation=None, max_tokens: int = None) -> str:
+    """Call Mistral's own API directly."""
+    if not MISTRAL_API_KEY:
+        raise ValueError("MISTRAL_API_KEY is not set.")
+
+    headers = {
+        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+
+    start = time.time()
+    resp = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=120)
+    if not resp.ok:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        print(f"[Mistral] HTTP {resp.status_code} for model '{model}': {body}")
+    resp.raise_for_status()
+    data = resp.json()
+    elapsed = round(time.time() - start, 2)
+
+    if "choices" not in data or not data["choices"]:
+        raise ValueError(f"Mistral returned empty choices. Response: {data}")
+
+    output = data["choices"][0]["message"]["content"]
+
+    if generation:
+        try:
+            usage = data.get("usage", {})
+            generation.end(
+                output=output,
+                model=model,
+                usage={
+                    "input": usage.get("prompt_tokens"),
+                    "output": usage.get("completion_tokens"),
+                    "total": usage.get("total_tokens"),
+                },
+                metadata={"provider": "mistral", "latency_s": elapsed},
+            )
+        except Exception:
+            pass
+
+    return output
+
+
+# -----------------------------------------------------------------
 # Gemini call
 # -----------------------------------------------------------------
 def _call_gemini(prompt: str, use_search: bool = False, generation=None, max_tokens: int = None) -> str:
@@ -281,6 +343,31 @@ def generate_with_fallback(
                 if trace is None:
                     flush()
                 raise
+
+    # Try Mistral directly if configured for this agent
+    mistral_model = _AGENT_MISTRAL_MODEL.get(agent_name)
+    if mistral_model and MISTRAL_API_KEY:
+        gen = None
+        try:
+            print(f"[LLM] Trying Mistral ({mistral_model}) for '{agent_name}'...")
+            gen = active_trace.generation(
+                name=f"{agent_name}:mistral",
+                model=mistral_model,
+                input=prompt,
+                metadata={"provider": "mistral", "max_tokens": token_limit},
+            )
+            result = _call_mistral(prompt, model=mistral_model, generation=gen, max_tokens=token_limit)
+            print(f"[LLM] ✅ Mistral ({mistral_model}) succeeded for '{agent_name}'")
+            if trace is None:
+                flush()
+            return result
+        except Exception as e:
+            print(f"[LLM] ❌ Mistral ({mistral_model}) failed: {e}")
+            if gen:
+                try:
+                    gen.end(level="ERROR", status_message=str(e))
+                except Exception:
+                    pass
 
     # Fallback chain through OpenRouter models (agent-specific or default)
     fallback_list = _AGENT_FALLBACKS.get(agent_name, FALLBACK_MODELS)
