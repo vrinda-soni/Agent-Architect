@@ -11,527 +11,274 @@ if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API
     raise ValueError("No API key found. Set GEMINI_API_KEY or OPENROUTER_API_KEY in your .env file.")
 
 
+def _recover_items(text: str) -> list:
+    """
+    Extract every fully-closed JSON object from the 'items' array in truncated text.
+    Immune to truncation at any position — stops before the first incomplete object.
+    """
+    pos = text.find('"items"')
+    if pos == -1:
+        return []
+    arr = text.find('[', pos)
+    if arr == -1:
+        return []
+
+    items, pos = [], arr + 1
+    while pos < len(text):
+        while pos < len(text) and text[pos] in ' \t\n\r,':
+            pos += 1
+        if pos >= len(text) or text[pos] in (']', '}'):
+            break
+        if text[pos] != '{':
+            break
+
+        depth, in_s, esc, end = 0, False, False, None
+        for i in range(pos, len(text)):
+            ch = text[i]
+            if esc:             esc = False;  continue
+            if ch == '\\' and in_s: esc = True; continue
+            if ch == '"':       in_s = not in_s; continue
+            if in_s:            continue
+            if ch == '{':       depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:  end = i; break
+
+        if end is None:
+            break
+        try:
+            items.append(json.loads(text[pos:end + 1]))
+        except json.JSONDecodeError:
+            break
+        pos = end + 1
+
+    return items
+
+
 ESTIMATION_AGENT_PROMPT = """
-You are an Expert Technical Project Manager, Solution Architect, Engineering Manager, and Delivery Planner.
+You are an Expert Project Manager and Solution Architect.
 
-Your primary responsibility is to transform approved project requirements, architecture decisions, and feasibility findings into an execution-ready Work Breakdown Structure (WBS) that can be directly used for:
-
-- Project Planning
-- Resource Allocation
-- Engineering Task Assignment
-- Delivery Tracking
-
-Your responsibility is to identify implementation work, ownership responsibilities, dependencies, and project structure.
-
-Do not estimate effort, story points, durations, or engineering hours.
-
-You must think like an experienced Technical Lead preparing a project for real implementation.
+Your job is to produce a complete, end-to-end Work Breakdown Structure (WBS) for the project described in the inputs below.
 
 You will receive:
+- Approved Requirements (from Task Agent)
+- Approved Architecture Plan (from Planning Agent)
+- Approved Feasibility Analysis (from Feasibility Agent)
 
-- Approved Requirements
-- Approved Architecture Plan
-- Approved Feasibility Analysis
-
-Use these approved inputs as the single source of truth.
-
-Do NOT invent:
-
-- Requirements
-- Features
-- Modules
-- Technologies
-- Integrations
-- Architecture Decisions
-- Functionality
-
-that cannot be justified by the approved project inputs.
-
-The final output should resemble how an experienced Technical Lead would decompose a project before assigning work to engineering teams.
+These are your ONLY source of truth. Do NOT invent anything not present in the inputs.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 1 — PROJECT DECOMPOSITION
+STEP 1 — IDENTIFY STACK DISCIPLINES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Before generating any work breakdown rows:
+Read the Architecture Plan. Identify which discipline areas this project genuinely needs.
 
-1. Identify all Business Capabilities.
+Choose ONLY from:
+  Frontend | Backend | AI/ML | DevOps | Cloud | Mobile | Data Engineering | QA | Security
 
-2. Identify all Functional Areas.
-
-3. Identify all Modules.
-
-4. Identify all Features.
-
-5. Identify all Tasks.
-
-6. Identify all Sub Tasks.
-
-7. Identify all Dependencies.
-
-8. Identify all Engineering Ownership Streams.
-
-Continue decomposition until every generated item represents a concrete engineering activity that can be directly assigned to an engineer.
-
-HOW TO REASON ABOUT THE DECOMPOSITION (think like a Technical Lead):
-
-Do NOT apply a fixed template. Reason about THIS specific project and let the structure emerge from it.
-
-For each engineering area / ownership stream present in the project, think top-down:
-
-  1. What does this project actually need from this area?
-  2. Which functionality types belong to it?
-  3. Which modules sit under each functionality type?
-  4. Which features / screens / interfaces / services sit under each module?
-  5. Which concrete tasks deliver each feature?
-  6. Which logical, implementable sub-tasks make up each task?
-
-Example of the reasoning style (illustrative — adapt to the real project):
-
-  Area: Frontend
-  → Functionality Type: User-Facing Application
-    → Module: Role-Play Training Interface
-      → Feature: Live Conversation Screen
-        → Task: Build conversation UI with streaming responses
-          → Sub Task: Render message bubbles with role styling
-          → Sub Task: Wire streaming token rendering from API
-          → Sub Task: Handle audio playback controls inline
-          → Sub Task: Manage loading / error / empty states
-
-  Area: Backend
-  → Functionality Type: AI Orchestration
-    → Module: Scoring Engine
-      → Feature: Role-Play Performance Scoring
-        → Task: Implement scoring service
-          → Sub Task: Define scoring rubric data model
-          → Sub Task: Build LLM scoring prompt + parser
-          → Sub Task: Persist scores to data store
-          → Sub Task: Expose scoring results via API endpoint
-
-The DEPTH and the LABELS adapt to each project. A data pipeline, a mobile app, and an integration platform should each produce a different and natural hierarchy — not the same columns forced onto every project.
-
-Every generated item must be traceable to one or more approved:
-
-- Requirements
-- Architecture Decisions
-- Feasibility Findings
-
-Do not generate unsupported functionality. Do not skip any area, module, feature, or integration that the approved inputs genuinely require.
-
-The decomposition should resemble how an experienced Technical Lead would prepare work before assigning tasks to engineering teams.
+Output only disciplines that actually exist in THIS project's tech stack.
+These become the dynamic column headers — output as:
+  "stack_columns": ["Frontend", "Backend", "AI/ML", "DevOps"]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 2 — TASK QUALITY REQUIREMENTS
+STEP 2 — IDENTIFY FUNCTIONALITIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The generated work breakdown must be implementation-ready.
-
-Do NOT generate vague, generic, or non-actionable tasks.
-
-Avoid outputs such as:
-
-- Authentication
-- Dashboard
-- Reporting
-- Search
-- User Management
-- AI Module
-- Candidate Management
-- Notifications
-- Analytics
-- Chatbot
-- Database
-
-These are features/modules, not assignable tasks.
-
-Instead generate implementation-ready activities.
+Group the entire project into major functional areas. Label them A, B, C, D...
 
 Example:
-
-Authentication
-
-Generate:
-
-- Login API Implementation
-- JWT Validation Middleware
-- Password Reset Workflow
-- RBAC Enforcement Logic
-- Authentication Integration Tests
-
-Dashboard
-
-Generate:
-
-- Dashboard Layout Component
-- Dashboard Metrics API
-- KPI Widget Component
-- Dashboard Data Aggregation Service
-- Dashboard Integration Tests
-
-If a task cannot be directly assigned to a team member or engineering delivery stream, continue decomposing it.
-
-Every generated row must represent a concrete implementation activity with a clear ownership responsibility.
-
-The generated work breakdown should be suitable for task assignment, sprint planning, and project delivery tracking,Downstream Effort Estimation, Resource planning.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 3 — IDENTIFY HIDDEN IMPLEMENTATION WORK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Identify implementation activities that are commonly required for successful delivery.
-
-Include only when genuinely required.
-
-Examples:
-
-- Validation
-- Error Handling
-- Logging
-- Monitoring
-- Security Controls
-- Authentication
-- Authorization
-- API Documentation
-- Infrastructure Setup
-- Deployment
-- Backup Strategy
-- Retry Logic
-- Audit Logging
-- Testing
-- Performance Optimization
-- Configuration Management
-- Cost Monitoring
-- Observability
-- Alerting
-- Data Retention
-- Data Migration
-
-Do not invent unnecessary features.
+  A → User Management & Authentication
+  B → AI Conversation Engine
+  C → Reporting & Analytics
+  D → Infrastructure & DevOps
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 4 — DECIDE STRUCTURAL COLUMNS (DYNAMIC)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Choose the structural columns that best describe THIS project's implementation work breakdown.
-
-Always include:
-
-* Number
-* Complexity
-* Dependencies
-
-The remaining structural columns must be generated dynamically based on the project's implementation structure.
-
-The generated hierarchy should clearly represent how the project is decomposed into assignable engineering work.
-
-Possible structural columns include (but are not limited to):
-
-* Functionality Type
-* Business Capability
-* Functional Area
-* Module
-* Feature
-* Component
-* Service
-* Screen
-* Workflow
-* Pipeline Stage
-* Work Area
-* Task
-* Sub Task
-
-Only generate columns that are genuinely required to describe the project's implementation structure.
-
-Do not create columns that would remain empty.
-
-The structural hierarchy should be determined dynamically from the approved project inputs.
-
-Examples:
-
-AI SaaS Platform:
-
-["No","Functionality Type","Module","Feature","Task","Sub Task","Complexity","Dependencies"]
-
-Mobile Application:
-
-["No","Screen","Feature","Task","Sub Task","Complexity","Dependencies"]
-
-Data Engineering Platform:
-
-["No","Pipeline Stage","Component","Task","Sub Task","Complexity","Dependencies"]
-
-Integration Platform:
-
-["No","Integration Area","Service","Task","Sub Task","Complexity","Dependencies"]
-
-Rules:
-
-* "No" must always be the first column.
-* Complexity must always exist.
-* Dependencies must always exist.
-* Choose the columns that genuinely fit THIS project — do not force the same columns onto every project. A mobile app, a data pipeline, and an integration platform should each get a different, natural hierarchy.
-* Whatever columns you choose, the deepest level must reach single, directly assignable engineering activities (logical implementable sub-tasks). If your chosen columns stop at feature or task level and rows are still not directly assignable, add a deeper column so the breakdown reaches assignable granularity.
-* Structural columns must adapt to the project.
-* The hierarchy should reflect how an experienced Technical Lead would decompose the project for execution.
-* Avoid redundant columns.
-* Avoid duplicate hierarchy levels.
-* Every generated row must fit naturally within the chosen structure.
-
-The final structural columns should make the project easy to:
-
-* Understand
-* Assign
-* Track
-* Deliver
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 5 — DECIDE OWNER COLUMNS (DYNAMIC)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Generate owner columns dynamically.
-
-Owner columns represent engineering delivery streams, implementation responsibilities, or delivery teams.
-
-They do NOT represent programming languages, frameworks, cloud providers, or specific technologies.
-
-Examples of possible owner streams include:
-
-* Frontend
-* Backend
-* AI/ML
-* Integration
-* Cloud Infrastructure
-* DevOps
-* Security
-* QA
-* Data Engineering
-* Mobile
-* Analytics Engineering
-* Platform Engineering
-* Salesforce
-* SAP
-
-These are examples only and should not be treated as a fixed list.
-
-Rules:
-
-* Generate owner streams dynamically based on the approved project inputs.
-* Only generate owner streams that have actual implementation responsibility.
-* Do not force predefined owner streams.
-* A task may contribute effort to multiple owner streams.
-* Owner streams should represent who is responsible for delivering the work, not the technology being used.
-
-Incorrect:
-
-* React
-* Python
-* NodeJS
-* Azure
-* LangChain
-* FastAPI
-* PostgreSQL
-
-Correct:
-
-* Frontend
-* Backend
-* AI/ML
-* Security
-* QA
-* Data Engineering
-* Mobile
-
-When multiple owner streams exist, order them logically according to the project's implementation structure.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 6 — BUILD WORK BREAKDOWN ROWS
-
-Generate the execution-ready Work Breakdown Structure.
-
-Each row must:
-
-- Represent a concrete assignable engineering activity
-- Belong to the chosen project hierarchy
-- Include Complexity
-- Include Dependencies
-- Include Owners
-- Include tech_remarks
-- Include ba_remarks
-
-For every row:
-
-- Populate all structural columns
-- Populate owners
-- Populate tech_remarks
-- Populate ba_remarks
-
-A row may have one or more owners.
-
-Avoid duplicate work items.
-
-Every generated row must represent a realistic engineering activity that could be assigned to a specific team member or delivery stream.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 7 — DECOMPOSITION DEPTH AND COMPLETENESS
+STEP 3 — CREATE MODULES (ONE ROW PER MODULE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-RULE 1 — DEPTH: Every row must be directly assignable.
+⚠️ CRITICAL RULE: ONE ROW PER MODULE. Never create multiple rows for the same module.
 
-The single test for every row:
-Can this row be handed directly to one engineer to implement, with no further breakdown needed?
-- YES → keep it.
-- NO  → decompose it further. Do not include it as-is.
+For each Functionality, list specific deliverable modules numbered A.0, A.1, A.2... B.1, B.2...
 
-Do NOT stop at Business Capability, Functional Area, Module, Feature, or Task if those still contain multiple implementable units.
+A module is ONE specific thing being built — not a layer, not a technology.
 
-WRONG — still a feature, not assignable:
-  "Azure AD B2C Integration Setup" → Backend
+BAD (do NOT do this):
+  Row 1: Authentication | Backend API
+  Row 2: Authentication | Frontend UI
+  Row 3: Authentication | Cloud Infrastructure
+  ← WRONG: same module split into 3 rows by layer
 
-RIGHT — each is a directly assignable sub-task:
-  "Create Azure AD B2C Tenant and Configure Custom Domain" → Backend
-  "Define User Flows for Sign-Up, Sign-In, and Password Reset" → Backend
-  "Register Application and Configure Redirect URIs in B2C" → Backend
-  "Implement Token Acquisition and Refresh Logic in API Layer" → Backend
-  "Configure Custom Claims and Token Lifetime Policies" → Backend
-  "Write Integration Tests for B2C Authentication Flows" → QA
+GOOD (do this):
+  Row 1: no=A.1 | module=Login Flow | features=User logs in via email/password, JWT issued on success, login form with validation | stack_involvement={{Frontend:true, Backend:true, Cloud:false}}
+  ← CORRECT: one row, multiple disciplines marked true
 
-WRONG — still a feature, not assignable:
-  "React Role-Play Interface Development" → Frontend
-
-RIGHT — each is a directly assignable sub-task:
-  "Scaffold Role-Play Screen Routes and Navigation Structure" → Frontend
-  "Build Role-Play Conversation UI Component" → Frontend
-  "Integrate Audio Playback Controls into Role-Play Screen" → Frontend
-  "Wire Role-Play State Management with API Response Handling" → Frontend
-  "Implement Role-Play Session Timer and Progress Indicator" → Frontend
-  "Write Unit Tests for Role-Play UI Components" → QA
+For each module fill:
+  - no: alphanumeric string like "A.1", "B.3" (NEVER a plain integer like 1, 2, 3)
+  - functionality: the parent functionality name
+  - module: short specific name (e.g. "Login Flow", "JWT Token Management", "RAG Pipeline", "Role-Based Access Control")
+  - features: 1-2 sentences describing EXACTLY what gets built in this module. Be specific.
+    Example: "User authenticates via email and password. On success, a JWT access token (15 min) and refresh token are issued. Invalid credential errors handled with rate limiting."
+    Example: "Documents uploaded by managers are chunked into 512-token segments, embedded using Gemini embedding-001, and stored in pgvector with HNSW index for fast similarity search."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE 2 — COMPLETENESS: Cover the entire project end to end.
-
-Every module, feature, integration, layer, and concern identified in the approved inputs must appear in the work breakdown.
-
-Do NOT skip or omit:
-- Any functional module or screen
-- Any third-party integration or API
-- Any infrastructure or deployment concern
-- Any security, authentication, or authorization requirement
-- Any data layer, storage, or migration concern
-- Any AI/ML pipeline or model integration
-- Any testing layer (unit, integration, E2E)
-- Any observability, logging, or monitoring setup
-- Any DevOps, CI/CD, or environment configuration
-
-Before finalising the output, verify:
-- Every approved requirement maps to at least one row.
-- Every approved architecture component maps to at least one row.
-- Every engineering ownership stream has rows assigned to it.
-- No module, feature, or integration from the inputs is missing from the breakdown.
-
+STEP 4 — ASSIGN INTERFACE TYPE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The number of rows is determined entirely by the project's actual scope and complexity.
-Do not artificially limit or inflate rows.
-Let the depth and breadth emerge naturally from what the project genuinely requires.
-
-The final decomposition must be detailed enough that an Engineering Manager can hand any single row directly to an engineer without further clarification.
+For each module, write the Interface Type — the technical layer(s) it spans.
+Can be combined with +: Web | Backend | AI Service | Cloud | Mobile | Data Pipeline | DevOps/CI-CD
+Example: "Web + Backend", "Backend + AI Service", "Backend + Cloud"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 8 — REMARKS RULES
+STEP 5 — MARK STACK INVOLVEMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-tech_remarks:
+For each module, for EVERY discipline in stack_columns, set true or false.
 
-Always populated.
+⚠️ RULES:
+- stack_involvement MUST include ALL disciplines from stack_columns — no missing keys
+- true = this discipline does real work on this module
+- false = this discipline is not involved
+- At least ONE discipline must be true per module
+- Multiple disciplines can be true for the same module — this is the point
 
-Include:
+Example for "Login Flow" (stack_columns = ["Frontend","Backend","AI/ML","DevOps","Cloud"]):
+  stack_involvement: {{"Frontend": true, "Backend": true, "AI/ML": false, "DevOps": false, "Cloud": false}}
 
-- Assumptions
-- Risks
-- Technical Dependencies
-- Architecture Notes
-- Important Implementation Considerations
-- Integration Considerations
-- Scalability Considerations
-
-ba_remarks:
-
-Always:
-
-""
-
-Never populate BA remarks.
+Example for "CI/CD Pipeline Setup":
+  stack_involvement: {{"Frontend": false, "Backend": false, "AI/ML": false, "DevOps": true, "Cloud": true}}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP 9 — OUTPUT FORMAT
+STEP 6 — TECH REMARKS & BA REMARKS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Return ONLY a valid JSON object.
+- tech_remarks: specific assumptions or design decisions for this module.
+  Be concrete — name the technology, pattern, or constraint.
+  E.g. "JWT access token 15min expiry + refresh token rotation; Redis for token blacklist"
+  E.g. "Gemini embedding-001 (768-dim) + pgvector HNSW index; top-k=6 retrieval"
+  E.g. "ElevenLabs TTS API; voice assigned per persona; fallback to browser speech synthesis"
 
-No markdown.
+- ba_remarks: ALWAYS "" — left blank for BA team to fill manually
 
-No explanations.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 7 — COMPLETENESS CHECK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-No text outside JSON.
+✅ Every requirement covered by at least one module
+✅ Every architecture component has a module
+✅ Every discipline in stack_columns is marked true in at least one module
+✅ No module has all disciplines false
+✅ features field is filled with a specific description for every module — never empty
+✅ no field is always a string like "A.1" — never an integer
+✅ Infrastructure, Security, Testing, CI/CD all covered
+✅ Coverage end-to-end: DB → API → UI → AI → Cloud → Security → QA → DevOps
 
-JSON Schema:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 8 — OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY valid JSON. No markdown, no extra text, no explanations.
 
 {{
-  "structural_columns": [],
-  "owner_columns": [],
-  "work_breakdown": [
+  "functionalities": [
+    {{"letter": "A", "name": "User Management & Authentication"}},
+    {{"letter": "B", "name": "AI Conversation Engine"}},
+    {{"letter": "C", "name": "Infrastructure & DevOps"}}
+  ],
+  "stack_columns": ["Frontend", "Backend", "AI/ML", "DevOps", "Cloud"],
+  "items": [
     {{
-      "<dynamic_structural_column>": "",
-      "owners": [],
-      "tech_remarks": "",
+      "no": "A.0",
+      "functionality": "User Management & Authentication",
+      "module": "Auth Setup & Configuration",
+      "features": "Supabase Auth configured with email/password provider. Base routing, middleware, and environment setup for the full authentication system.",
+      "interface_type": "Backend + DevOps",
+      "stack_involvement": {{
+        "Frontend": true,
+        "Backend": true,
+        "AI/ML": false,
+        "DevOps": true,
+        "Cloud": false
+      }},
+      "tech_remarks": "Supabase Auth with RLS enabled; .env managed via dotenv; CORS configured for frontend origin",
+      "ba_remarks": ""
+    }},
+    {{
+      "no": "A.1",
+      "functionality": "User Management & Authentication",
+      "module": "Login Flow",
+      "features": "User authenticates via email and password. JWT access token (15 min) and refresh token issued on success. Invalid credential errors returned with rate limiting on repeated failures.",
+      "interface_type": "Web + Backend",
+      "stack_involvement": {{
+        "Frontend": true,
+        "Backend": true,
+        "AI/ML": false,
+        "DevOps": false,
+        "Cloud": false
+      }},
+      "tech_remarks": "JWT access token 15min; refresh token rotation on use; 5 failed attempts triggers 15min lockout",
+      "ba_remarks": ""
+    }},
+    {{
+      "no": "A.2",
+      "functionality": "User Management & Authentication",
+      "module": "Role-Based Access Control",
+      "features": "Three roles: Associate, Manager, Admin. Role assigned at registration. API middleware enforces role permissions on all protected routes. Frontend conditionally renders UI based on role.",
+      "interface_type": "Web + Backend",
+      "stack_involvement": {{
+        "Frontend": true,
+        "Backend": true,
+        "AI/ML": false,
+        "DevOps": false,
+        "Cloud": false
+      }},
+      "tech_remarks": "RBAC middleware applied at route level; roles stored in Supabase user metadata; frontend reads role from JWT claims",
+      "ba_remarks": ""
+    }},
+    {{
+      "no": "B.1",
+      "functionality": "AI Conversation Engine",
+      "module": "RAG Pipeline",
+      "features": "Uploaded documents chunked into 512-token segments, embedded via Gemini embedding-001 (768-dim), and stored in pgvector with HNSW index. Similarity search retrieves top-6 chunks per query.",
+      "interface_type": "Backend + AI Service",
+      "stack_involvement": {{
+        "Frontend": false,
+        "Backend": true,
+        "AI/ML": true,
+        "DevOps": false,
+        "Cloud": false
+      }},
+      "tech_remarks": "Gemini embedding-001; 768-dim vectors; pgvector HNSW index; cosine similarity; top-k=6 retrieval",
       "ba_remarks": ""
     }}
+  ],
+  "assumptions": [
+    "Supabase used for auth, database, and vector storage",
+    "Gemini 2.0 Flash used as primary LLM with OpenRouter fallback"
   ]
 }}
-STRICT RULES:
 
-1. structural_columns must exactly match the structural keys used in every work_breakdown row.
-2. Every work_breakdown row must contain all structural columns.
+STRICT RULES — READ CAREFULLY:
+1. "no" is ALWAYS a string: "A.1", "B.3" — NEVER an integer like 1, 2, 3
+2. ONE ROW PER MODULE — never split one module into multiple rows by layer/discipline
+3. "features" MUST be filled for every row — a specific 1-2 sentence description, never empty
+4. stack_involvement MUST have ALL disciplines from stack_columns as keys (true or false)
+5. At least one discipline must be true per module
+6. "ba_remarks" is always "" — never fill it
+7. Return ONLY valid JSON
 
-3. tech_remarks must always contain meaningful implementation notes.
+{feedback_section}
 
-4. ba_remarks must always be "".
-
-5. Do not add extra root-level fields.
-
-6. Do not add:
-- MVP
-- Phase
-- Sprint
-- Release
-- Iteration
-- Future Scope
-- Future Enhancement
-
-7.The structure, owner streams, modules, features, tasks, subtasks, dependencies, and ownership assignments must be dynamically generated from the approved project inputs.
-
-8. Every generated task must be traceable to the approved Requirements, Architecture Plan, or Feasibility Analysis.
-
-9. Generate a complete execution-ready delivery plan suitable for engineering task assignment.
-
-10. Return ONLY valid JSON.
-11. Every work_breakdown row must contain an owners field.
-
-12. owners must contain one or more owner streams responsible for implementation.
-
-13. Do not generate duplicate tasks, subtasks, or implementation activities.
-14. Each work_breakdown row must represent a unique implementation activity.
-
-Do not merge multiple implementation activities into a single row when they can be independently assigned, developed, tested, or tracked.
-
-{rag_section}
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INPUTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-REQUIREMENTS:
+APPROVED REQUIREMENTS:
 {requirements}
 
-PLAN:
+APPROVED ARCHITECTURE PLAN:
 {plan}
 
-FEASIBILITY:
+APPROVED FEASIBILITY ANALYSIS:
 {feasibility}
 """
 
@@ -541,28 +288,74 @@ def run_estimation_agent(
     plan: dict,
     feasibility: dict,
     transcript: str = "",
-    include_mvp: bool = False,  # kept for API compatibility
+    include_mvp: bool = False,
     rag_context: str = "",
     feedback: str = "",
 ) -> EstimationAgentOutput:
     if not requirements or not plan or not feasibility:
         raise ValueError("Requirements, Plan, and Feasibility cannot be empty.")
 
-    rag_section = rag_context or ""
+    feedback_section = ""
     if feedback and feedback.strip():
-        rag_section = (
+        feedback_section = (
             f"USER FEEDBACK TO ADDRESS:\n---\n{feedback.strip()}\n---\n"
-            "Incorporate the above feedback before proceeding.\n\n"
-            + rag_section
+            "Incorporate this feedback before generating the output.\n"
         )
+    if rag_context and rag_context.strip():
+        feedback_section += f"\nADDITIONAL REFERENCE CONTEXT:\n{rag_context}\n"
 
     prompt = ESTIMATION_AGENT_PROMPT.format(
         requirements=json.dumps(requirements, indent=2),
         plan=json.dumps(plan, indent=2),
         feasibility=json.dumps(feasibility, indent=2),
-        rag_section=rag_section,
+        feedback_section=feedback_section,
     )
 
     raw_text = generate_with_fallback(prompt, use_search=False, agent_name="estimation_agent")
-    parsed = extract_json(raw_text)
+
+    # Stage 1: full JSON extraction
+    parsed = None
+    try:
+        parsed = extract_json(raw_text)
+    except Exception as e:
+        print(f"[EstimationAgent] extract_json failed ({e}), trying item-by-item recovery")
+
+    # Stage 2: item-by-item recovery for truncated output
+    if not parsed or not parsed.get("items"):
+        recovered = _recover_items(raw_text)
+        if recovered:
+            print(f"[EstimationAgent] Recovered {len(recovered)} items from truncated output")
+            stack_cols = list({
+                k for item in recovered
+                for k in (item.get("stack_involvement") or {}).keys()
+            })
+            parsed = {
+                "functionalities": [],
+                "stack_columns": stack_cols,
+                "items": recovered,
+                "assumptions": [],
+            }
+        else:
+            raise ValueError(
+                f"Estimation Agent: could not extract any items from LLM output.\n"
+                f"First 400 chars:\n{raw_text[:400]}"
+            )
+
+    # Drop incomplete last item (missing required fields)
+    items = parsed.get("items", [])
+    if items:
+        last = items[-1]
+        missing = [f for f in ("no", "functionality", "module", "features", "interface_type")
+                   if not str(last.get(f, "")).strip()]
+        if missing:
+            print(f"[EstimationAgent] Dropping incomplete last item (missing: {missing})")
+            parsed["items"] = items[:-1]
+
+    # Derive stack_columns from items if agent forgot to include them
+    if not parsed.get("stack_columns") and parsed.get("items"):
+        parsed["stack_columns"] = list({
+            k for item in parsed["items"]
+            for k in (item.get("stack_involvement") or {}).keys()
+        })
+
     return EstimationAgentOutput(**parsed)

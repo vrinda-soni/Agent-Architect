@@ -15,14 +15,23 @@ def _supabase():
     return supabase
 
 
+_gemini_embed_client = None
+
+def _get_embed_client():
+    global _gemini_embed_client
+    if _gemini_embed_client is None:
+        from google import genai
+        _gemini_embed_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
+    return _gemini_embed_client
+
+
 def _embed_gemini(text: str) -> list[float]:
-    from google import genai
     from google.genai.types import EmbedContentConfig
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
+    client = _get_embed_client()
     result = client.models.embed_content(
         model="models/gemini-embedding-001",
         contents=text,
-        config=EmbedContentConfig(output_dimensionality=768),  # match Supabase pgvector dim
+        config=EmbedContentConfig(output_dimensionality=768),
     )
     return [float(v) for v in result.embeddings[0].values]
 

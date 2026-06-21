@@ -16,13 +16,11 @@ import chainlit as cl
 import pandas as pd
 
 import backend.supabase as db
-from backend.api.client import (
-    call_task_agent,
-    call_planning_agent,
-    call_feasibility_agent,
-    call_report_agent,
-)
+from backend.agents.task_agent import run_task_agent
+from backend.agents.planning_agent import run_planning_agent
+from backend.agents.feasibility_agent import run_feasibility_agent
 from backend.agents.estimation_agent import run_estimation_agent
+from backend.agents.report_agent import run_report_agent
 from backend.rag.retrival import retrieve_context as _retrieve_context, format_context_for_prompt as _format_context
 from backend.report_generator import generate_docx, generate_pdf, generate_json, generate_markdown
 from backend.rag.ingestion import ingest_document, list_project_documents, extract_text
@@ -197,17 +195,30 @@ def _build_estimation_df(estimation, include_mvp: bool = False) -> pd.DataFrame:
             estimation = EstimationAgentOutput(**estimation)
         except Exception:
             return pd.DataFrame({"Error": ["Invalid estimation format"]})
-    struct_cols = estimation.structural_columns or []
+
+    stack_cols = estimation.stack_columns or []
+    fixed_start = ["No", "Functionality Type", "Module", "Features", "Interface Type"]
+    fixed_end   = ["Complexity", "Tech Remarks", "BA Remarks"]
+    all_cols    = fixed_start + stack_cols + fixed_end
+
     rows = []
-    for item in estimation.work_breakdown:
-        data = item if isinstance(item, dict) else item.model_dump(warnings=False)
-        row = {col: data.get(col, "") for col in struct_cols}
-        owners = data.get("owners") or []
-        row["Owners"] = ", ".join(owners) if isinstance(owners, list) else str(owners)
-        row["Tech Remarks"] = data.get("tech_remarks", "")
-        row["BA Remarks"]   = ""
+    for item in (estimation.items or []):
+        data = item if isinstance(item, dict) else item.model_dump()
+        involvement = data.get("stack_involvement") or {}
+        row = {
+            "No":               data.get("no", ""),
+            "Functionality Type": data.get("functionality", ""),
+            "Module":           data.get("module", ""),
+            "Features":         data.get("features", ""),
+            "Interface Type":   data.get("interface_type", ""),
+            "Complexity":       "",
+            "Tech Remarks":     data.get("tech_remarks", ""),
+            "BA Remarks":       "",
+        }
+        for col in stack_cols:
+            row[col] = "✓" if involvement.get(col) else ""
         rows.append(row)
-    all_cols = struct_cols + ["Owners", "Tech Remarks", "BA Remarks"]
+
     return pd.DataFrame(rows, columns=all_cols)
 
 
@@ -311,19 +322,44 @@ def _feasibility_output_to_text(output) -> str:
 
 
 def _estimation_output_to_text(estimation) -> str:
+    if isinstance(estimation, dict):
+        from backend.schemas.estimation_schema import EstimationAgentOutput
+        try:
+            estimation = EstimationAgentOutput(**estimation)
+        except Exception:
+            return ""
     lines = ["=== Work Breakdown Structure ==="]
-    struct_cols = estimation.structural_columns or []
-    for item in estimation.work_breakdown:
-        data = item if isinstance(item, dict) else item.model_dump(warnings=False)
-        parts = [str(data.get(col, "")) for col in struct_cols if data.get(col)]
-        owners = data.get("owners") or []
-        if owners:
-            parts.append(f"Owners: {', '.join(owners) if isinstance(owners, list) else owners}")
-        remarks = data.get("tech_remarks", "")
-        if remarks:
-            parts.append(f"Notes: {remarks}")
-        lines.append("- " + " | ".join(p for p in parts if p))
+    stack_cols = estimation.stack_columns or []
+    for item in (estimation.items or []):
+        data = item if isinstance(item, dict) else item.model_dump()
+        involvement = data.get("stack_involvement") or {}
+        active = [c for c in stack_cols if involvement.get(c)]
+        lines.append(
+            f"[{data.get('no','')}] {data.get('functionality','')} > {data.get('module','')} "
+            f"| {data.get('features','')} "
+            f"| Interface: {data.get('interface_type','')} "
+            f"| Stacks: {', '.join(active)} "
+            f"| Remarks: {data.get('tech_remarks','')}"
+        )
+    if estimation.assumptions:
+        lines.append("\n=== Assumptions ===")
+        lines.extend(f"- {a}" for a in estimation.assumptions)
     return "\n".join(lines)
+
+
+def _build_rag_context(project_id: str | None, requirements: dict) -> str:
+    if not project_id:
+        return ""
+    try:
+        query = " ".join(
+            requirements.get("pain_points", []) +
+            requirements.get("requirements", []) +
+            requirements.get("business_goals", [])
+        )[:1500]
+        chunks = retrieve_context(project_id, query)
+        return format_context_for_prompt(chunks)
+    except Exception:
+        return ""
 
 
 async def _ingest_to_rag(project_id: str, text: str, doc_name: str, doc_type: str = "txt") -> None:
@@ -416,31 +452,35 @@ async def _qa_answer(s: dict, question: str) -> None:
         _save(s)
         return
 
-    # Query expansion — 2 extra angles for better recall
+    # Query expansion — only for longer/complex questions (> 8 words); skip for short ones
     import json as _json
-    expand_prompt = (
-        f"Generate 3 different search queries to retrieve relevant information for this question "
-        f"from a software project document. Approach the topic from different angles "
-        f"(direct, conceptual, keyword-focused). Return only a JSON array of 3 strings. "
-        f"No explanation, no markdown.\nQuestion: {question}"
-    )
-    try:
-        expand_raw = await asyncio.to_thread(partial(generate_with_fallback, expand_prompt, agent_name="query_expander"))
-        extra_queries = _json.loads(expand_raw.strip().strip("```json").strip("```").strip())
-        if not isinstance(extra_queries, list):
-            extra_queries = []
-    except Exception:
-        extra_queries = []
-    all_queries = [question] + extra_queries[:2]
+    all_queries = [question]
+    if len(question.split()) > 8:
+        expand_prompt = (
+            f"Generate 2 different search queries to retrieve relevant information for this question "
+            f"from a software project document. Approach the topic from different angles "
+            f"(conceptual, keyword-focused). Return only a JSON array of 2 strings. "
+            f"No explanation, no markdown.\nQuestion: {question}"
+        )
+        try:
+            expand_raw = await asyncio.to_thread(partial(generate_with_fallback, expand_prompt, agent_name="query_expander"))
+            extra_queries = _json.loads(expand_raw.strip().strip("```json").strip("```").strip())
+            if isinstance(extra_queries, list):
+                all_queries = [question] + extra_queries[:2]
+        except Exception:
+            pass  # fall back to original question only
 
-    # RAG retrieval across all query angles
+    # RAG retrieval — run all query angles in parallel
     async with cl.Step(name="Searching Documents", type="retrieval") as step:
         step.input = question
         try:
+            tasks = [asyncio.to_thread(partial(retrieve_context, project_id, q, 6)) for q in all_queries]
+            results_per_query = await asyncio.gather(*tasks, return_exceptions=True)
             seen_ids: set = set()
             merged_chunks: list = []
-            for q in all_queries:
-                results = await asyncio.to_thread(partial(retrieve_context, project_id, q, 6))
+            for results in results_per_query:
+                if isinstance(results, Exception):
+                    continue
                 for c in results:
                     cid = c.get("id") or c.get("chunk_text", "")[:80]
                     if cid not in seen_ids:
@@ -449,7 +489,7 @@ async def _qa_answer(s: dict, question: str) -> None:
             merged_chunks.sort(key=lambda x: x.get("similarity", 0), reverse=True)
             chunks = merged_chunks[:10]
             context = format_context_for_prompt(chunks)
-            step.output = f"Found {len(chunks)} unique chunk(s) across {len(all_queries)} search angles"
+            step.output = f"Found {len(chunks)} unique chunk(s) across {len(all_queries)} search angle(s)"
         except Exception as e:
             chunks = []
             context = ""
@@ -775,25 +815,25 @@ async def _show_hitl2(s: dict) -> None:
 # ── Step 5: Estimation Agent ──────────────────────────────────────────────────
 
 async def _show_estimation_step(s: dict) -> None:
-    """Mirrors render_estimation_section header."""
     s["step"] = "estimation"
     _save(s)
-    mvp_label = "ON ✓" if s["include_mvp"] else "OFF"
     await cl.Message(
         content=(
-            f"### Step 5 — Effort Estimation\n\n"
-            "Generates a **Work Breakdown Structure** with per-module, per-role hour estimates.\n\n"
-            f"MVP / Full Build phase split: **{mvp_label}**"
+            "### Step 5 — Work Breakdown Structure\n\n"
+            "The agent reads all approved outputs and produces a dynamic WBS:\n\n"
+            "1. Identifies project **Functionalities** (A, B, C...)\n"
+            "2. Breaks each into **Modules** (A.1, A.2...)\n"
+            "3. Marks which **tech disciplines** are involved per module\n"
+            "4. Adds **Tech Remarks** (assumptions) — BA Remarks left blank for your team\n\n"
+            "Stack columns (Frontend, Backend, AI/ML, etc.) are **fully dynamic** per project."
         ),
         actions=[
             cl.Action(name="run_estimation", payload={}, label="▶ Run Estimation Agent"),
-            cl.Action(name="toggle_mvp",     payload={}, label="🔀 Toggle MVP Phase Split"),
         ],
     ).send()
 
 
 async def _show_estimation_result(s: dict) -> None:
-    """Renders estimation as two focused markdown tables + totals + Excel download."""
     est = s["estimation_output"]
     if isinstance(est, dict):
         from backend.schemas.estimation_schema import EstimationAgentOutput
@@ -804,23 +844,106 @@ async def _show_estimation_result(s: dict) -> None:
             await cl.Message(content=f"⚠️ Could not display estimation — format error: {e}").send()
             return
 
-    inc_mvp  = s["include_mvp"]
-    df       = _build_estimation_df(est, include_mvp=inc_mvp)
+    total   = len(est.items or [])
+    stacks  = est.stack_columns or []
+    funcs   = est.functionalities or []
 
-    # ── Render as code block (scrollable, proper rows & columns) ─────────────
-    from tabulate import tabulate
-    table_str = tabulate(df.values.tolist(), headers=list(df.columns), tablefmt="simple", numalign="right")
-    await cl.Message(content=f"### 📋 Work Breakdown Structure\n\n```\n{table_str}\n```").send()
+    # ── Summary card ──────────────────────────────────────────────────────────
+    summary = [f"### 📋 Work Breakdown Structure — {total} modules\n"]
+    if funcs:
+        summary.append("**Functionalities:**")
+        for f in funcs:
+            d = f if isinstance(f, dict) else f.model_dump()
+            summary.append(f"  {d.get('letter','')}.  {d.get('name','')}")
+    if stacks:
+        summary.append(f"\n**Tech Disciplines:** {' | '.join(stacks)}")
+    await cl.Message(content="\n".join(summary)).send()
 
-    # ── Excel download ────────────────────────────────────────────────────────
+    # ── Grouped preview by functionality ──────────────────────────────────────
+    df = _build_estimation_df(est)
+    preview_lines = ["```"]
+    current_func = None
+    count = 0
+    for _, row in df.iterrows():
+        if count >= 40:
+            break
+        func = row.get("Functionality Type", "")
+        if func != current_func:
+            preview_lines.append(f"\n── {func} ──")
+            current_func = func
+        # build concise row: No | Module | stack marks | Interface Type
+        marks = "  ".join(
+            f"{col}:✓" if row.get(col) == "✓" else f"{col}:·"
+            for col in stacks
+        )
+        preview_lines.append(f"  {str(row.get('No','')):6}  {str(row.get('Module',''))[:35]:35}  {marks}  [{row.get('Interface Type','')}]")
+        count += 1
+    preview_lines.append("```")
+    await cl.Message(content="\n".join(preview_lines)).send()
+    if total > 40:
+        await cl.Message(content=f"*Showing first 40 of {total} modules — full table in the Excel download.*").send()
+
+    # ── Assumptions ───────────────────────────────────────────────────────────
+    if est.assumptions:
+        lines = ["**Assumptions:**"]
+        lines.extend(f"- {a}" for a in est.assumptions)
+        await cl.Message(content="\n".join(lines)).send()
+
+    # ── Excel download with formatting ────────────────────────────────────────
     try:
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
         xl_buf = io.BytesIO()
         with pd.ExcelWriter(xl_buf, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Effort Estimation")
+            df.to_excel(writer, index=False, sheet_name="WBS")
+            wb = writer.book
+            ws = writer.sheets["WBS"]
+
+            # Header style
+            header_fill = PatternFill("solid", fgColor="1F3864")
+            header_font = Font(bold=True, color="FFFFFF", size=10)
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            # Alternating row fill colours per functionality group
+            func_colors = [
+                "DCE6F1", "E2EFDA", "FFF2CC", "FCE4D6",
+                "EAD1DC", "D9EAD3", "CFE2F3", "F4CCCC",
+            ]
+            func_map: dict = {}
+            color_idx = 0
+            thin = Side(style="thin", color="CCCCCC")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+                func_val = ws.cell(row=row_idx, column=2).value or ""
+                if func_val not in func_map:
+                    func_map[func_val] = func_colors[color_idx % len(func_colors)]
+                    color_idx += 1
+                fill = PatternFill("solid", fgColor=func_map[func_val])
+                for cell in row:
+                    cell.fill = fill
+                    cell.border = border
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+            # Column widths
+            col_widths = {"No": 8, "Functionality Type": 28, "Module": 28,
+                          "Features": 55, "Interface Type": 22,
+                          "Complexity": 14, "Tech Remarks": 45, "BA Remarks": 30}
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                width = col_widths.get(col_name, 14)
+                ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+            ws.freeze_panes = "A2"
+            ws.row_dimensions[1].height = 32
+
         await cl.Message(
-            content="📥 Download full estimation table:",
+            content="📥 Download full WBS (Excel):",
             elements=[cl.File(
-                name="effort_estimation.xlsx",
+                name="work_breakdown_structure.xlsx",
                 content=xl_buf.getvalue(),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 display="inline",
@@ -1020,16 +1143,18 @@ async def _show_report_result(s: dict) -> None:
             except Exception:
                 est_obj = None
     if est_obj:
-        wbs = est_obj.work_breakdown or []
-        all_owners = []
-        for item in wbs:
-            data = item if isinstance(item, dict) else item.model_dump(warnings=False)
-            for o in (data.get("owners") or []):
-                if o not in all_owners:
-                    all_owners.append(o)
-        est_lines = ["### 📊 Work Breakdown Summary\n", f"**Total work items: {len(wbs)}**"]
-        if all_owners:
-            est_lines.append(f"\n**Delivery streams:** {', '.join(all_owners)}")
+        wbs   = est_obj.items or []
+        funcs = est_obj.functionalities or []
+        stacks = est_obj.stack_columns or []
+        est_lines = ["### 📊 Work Breakdown Summary\n", f"**Total modules: {len(wbs)}**"]
+        if funcs:
+            func_names = [
+                (f if isinstance(f, dict) else f.model_dump()).get("name", "")
+                for f in funcs
+            ]
+            est_lines.append(f"**Functionalities:** {', '.join(func_names)}")
+        if stacks:
+            est_lines.append(f"**Tech Disciplines:** {' | '.join(stacks)}")
         await cl.Message(content="\n".join(est_lines)).send()
 
     # ── Downloads ─────────────────────────────────────────────────────────────
@@ -1291,10 +1416,7 @@ async def _handle_rag_upload(s: dict) -> None:
 
     files = await cl.AskFileMessage(
         content="📤 Upload reference documents (PDF, DOCX, or TXT) to enrich AI context:",
-        accept=["application/pdf",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/msword",
-                "text/plain", "text/markdown", "text/csv"],
+        accept=["*/*"],
         max_files=5,
         max_size_mb=100,
         timeout=120,
@@ -1475,10 +1597,7 @@ async def on_upload_new_transcript(action: cl.Action):
     s = _state()
     files = await cl.AskFileMessage(
         content="📤 Upload transcript file(s) — PDF, DOCX, or TXT, up to 100 MB each. Multiple files will be merged:",
-        accept=["application/pdf",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "application/msword",
-                "text/plain", "text/markdown", "text/csv"],
+        accept=["*/*"],
         max_files=5,
         max_size_mb=100,
         timeout=120,
@@ -1513,7 +1632,7 @@ async def on_run_task_agent(action: cl.Action):
     async with cl.Step(name="Task Agent", type="tool") as step:
         step.input = "Analyzing transcript with Gemini AI..."
         try:
-            result = await asyncio.to_thread(call_task_agent, transcript)
+            result = await asyncio.to_thread(run_task_agent, transcript)
             s["task_output"] = result
             s["approved_requirements"] = None
             _reset_pipeline(s)
@@ -1552,8 +1671,9 @@ async def on_hitl1_approve(action: cl.Action):
     async with cl.Step(name="Planning Agent", type="tool") as step:
         step.input = "Generating technical architecture..."
         try:
+            rag_ctx = _build_rag_context(pid, s["approved_requirements"])
             plan_result = await asyncio.to_thread(
-                partial(call_planning_agent, s["approved_requirements"], project_id=pid)
+                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx)
             )
             s["plan_output"] = plan_result
             _save(s)
@@ -1570,7 +1690,7 @@ async def on_hitl1_approve(action: cl.Action):
             step.input = "Assessing technical feasibility..."
             try:
                 feas = await asyncio.to_thread(
-                    partial(call_feasibility_agent, s["approved_requirements"], plan_result.model_dump())
+                    partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump())
                 )
                 s["feasibility_output"] = feas
                 _save(s)
@@ -1606,7 +1726,7 @@ async def on_hitl1_regen(action: cl.Action):
         step.input = f"Feedback: {feedback or 'none'}"
         try:
             result = await asyncio.to_thread(
-                partial(call_task_agent, s["current_transcript"], feedback=feedback)
+                partial(run_task_agent, s["current_transcript"], feedback=feedback)
             )
             s["task_output"] = result
             s["approved_requirements"] = None
@@ -1656,8 +1776,9 @@ async def on_hitl2_regen_plan(action: cl.Action):
     async with cl.Step(name="Planning Agent (Regenerate)", type="tool") as step:
         step.input = f"Feedback: {feedback or 'none'}"
         try:
+            rag_ctx = _build_rag_context(pid, s["approved_requirements"])
             plan_result = await asyncio.to_thread(
-                partial(call_planning_agent, s["approved_requirements"], project_id=pid, feedback=feedback)
+                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx, feedback=feedback)
             )
             s["plan_output"] = plan_result
             s["feasibility_output"] = None
@@ -1677,7 +1798,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
         step.input = "Re-running feasibility on updated plan..."
         try:
             feas = await asyncio.to_thread(
-                partial(call_feasibility_agent, s["approved_requirements"], plan_result.model_dump())
+                partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump())
             )
             s["feasibility_output"] = feas
             _save(s)
@@ -1710,7 +1831,7 @@ async def on_hitl2_rerun_feas(action: cl.Action):
         step.input = f"Feedback: {feedback or 'none'}"
         try:
             result = await asyncio.to_thread(
-                partial(call_feasibility_agent, s["approved_requirements"],
+                partial(run_feasibility_agent, s["approved_requirements"],
                         _to_dict(s["plan_output"]), feedback=feedback)
             )
             s["feasibility_output"] = result
@@ -1731,13 +1852,6 @@ async def on_hitl2_rerun_feas(action: cl.Action):
 
 
 # ── Estimation ────────────────────────────────────────────────────────────────
-
-@cl.action_callback("toggle_mvp")
-async def on_toggle_mvp(action: cl.Action):
-    s = _state()
-    s["include_mvp"] = not s.get("include_mvp", False)
-    _save(s)
-    await _show_estimation_step(s)
 
 
 @cl.action_callback("run_estimation")
@@ -1772,7 +1886,7 @@ async def on_run_estimation(action: cl.Action):
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            step.output = f"Generated {len(result.work_breakdown)} work items"
+            step.output = f"Generated {len(result.items)} work items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation Agent failed: {e}").send()
@@ -1836,7 +1950,7 @@ async def on_hitl3_regen(action: cl.Action):
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            step.output = f"Generated {len(result.work_breakdown)} work items"
+            step.output = f"Generated {len(result.items)} work items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation regeneration failed: {e}").send()
@@ -1896,7 +2010,7 @@ async def on_generate_report(action: cl.Action):
     async with cl.Step(name="Report Agent", type="tool") as step:
         step.input = "Generating 11-section consulting report..."
         try:
-            result = await asyncio.to_thread(partial(call_report_agent, req, plan, feas, est))
+            result = await asyncio.to_thread(partial(run_report_agent, req, plan, feas, est))
             s["report_output"] = result.model_dump()
             _save(s)
             step.output = "Report generated successfully"

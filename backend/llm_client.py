@@ -11,6 +11,7 @@ All calls are traced via Langfuse when configured.
 import os
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -128,7 +129,7 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 # -----------------------------------------------------------------
 # OpenRouter call
 # -----------------------------------------------------------------
-def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int = None) -> str:
+def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int = None, timeout: int = 45) -> str:
     """Call OpenRouter with a specific model."""
     if not OPENROUTER_API_KEY:
         raise ValueError(
@@ -149,7 +150,7 @@ def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int =
         payload["max_tokens"] = max_tokens
 
     start = time.time()
-    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=120)
+    resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=timeout)
     if not resp.ok:
         try:
             body = resp.json()
@@ -282,6 +283,54 @@ def _call_gemini(prompt: str, use_search: bool = False, generation=None, max_tok
 
 
 # -----------------------------------------------------------------
+# Per-agent OpenRouter timeout (seconds)
+# Large-output agents need more time; others fail fast so next model can be tried
+# -----------------------------------------------------------------
+_AGENT_OPENROUTER_TIMEOUT: dict[str, int] = {
+    "estimation_agent": 90,
+    "report_agent":     90,
+    "task_agent":       60,
+    "planning_agent":   60,
+    "feasibility_agent": 60,
+}
+_DEFAULT_OPENROUTER_TIMEOUT = 45
+
+
+def _try_openrouter_parallel(
+    prompt: str,
+    models: list,
+    token_limit: int | None,
+    or_timeout: int,
+    batch_size: int = 3,
+) -> str:
+    """
+    Try OpenRouter models in parallel batches of `batch_size`.
+    Returns the first successful response; raises if all fail.
+    """
+    last_error: Exception | None = None
+    batches = [models[i : i + batch_size] for i in range(0, len(models), batch_size)]
+
+    for batch in batches:
+        print(f"[LLM] Parallel batch: {[m.split('/')[0] for m in batch]}")
+        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+            future_to_model = {
+                executor.submit(_call_openrouter, prompt, m, None, token_limit, or_timeout): m
+                for m in batch
+            }
+            for future in as_completed(future_to_model):
+                model = future_to_model[future]
+                try:
+                    result = future.result()
+                    print(f"[LLM] ✅ {model} succeeded (parallel)")
+                    return result
+                except Exception as e:
+                    last_error = e
+                    print(f"[LLM] ❌ {model} failed: {e}")
+
+    raise ValueError(f"All parallel OpenRouter fallbacks failed. Last: {last_error}") from last_error
+
+
+# -----------------------------------------------------------------
 # Public API: generate with fallback + Langfuse tracing
 # -----------------------------------------------------------------
 # Per-agent output token limits — balances quality vs cost
@@ -371,37 +420,18 @@ def generate_with_fallback(
 
     # Fallback chain through OpenRouter models (agent-specific or default)
     fallback_list = _AGENT_FALLBACKS.get(agent_name, FALLBACK_MODELS)
-    print(f"[LLM] Gemini quota hit for '{agent_name}'. Trying {len(fallback_list)} OpenRouter fallbacks...")
-    last_error = None
-    for model in fallback_list:
-        gen = None
-        try:
-            print(f"[LLM] Trying {model} ...")
-            gen = active_trace.generation(
-                name=f"{agent_name}:{model.split('/')[0]}",
-                model=model,
-                input=prompt,
-                metadata={"provider": "openrouter", "max_tokens": token_limit},
-            )
-            result = _call_openrouter(prompt, model=model, generation=gen, max_tokens=token_limit)
-            print(f"[LLM] ✅ {model} succeeded for '{agent_name}'")
-            if trace is None:
-                flush()
-            return result
-        except Exception as e:
-            last_error = e
-            print(f"[LLM] ❌ {model} failed: {e}")
-            if gen:
-                try:
-                    gen.end(level="ERROR", status_message=str(e))
-                except Exception:
-                    pass
-            continue
+    or_timeout = _AGENT_OPENROUTER_TIMEOUT.get(agent_name, _DEFAULT_OPENROUTER_TIMEOUT)
+    print(f"[LLM] Gemini quota hit for '{agent_name}'. Trying {len(fallback_list)} OpenRouter fallbacks in parallel batches (timeout={or_timeout}s each)...")
 
-    if trace is None:
-        flush()
-
-    raise ValueError(
-        f"All models failed (Gemini + {len(fallback_list)} OpenRouter fallbacks for '{agent_name}'). "
-        f"Last error: {last_error}"
-    ) from last_error
+    try:
+        result = _try_openrouter_parallel(prompt, fallback_list, token_limit, or_timeout)
+        if trace is None:
+            flush()
+        return result
+    except Exception as last_error:
+        if trace is None:
+            flush()
+        raise ValueError(
+            f"All models failed (Gemini + {len(fallback_list)} OpenRouter fallbacks for '{agent_name}'). "
+            f"Last error: {last_error}"
+        ) from last_error

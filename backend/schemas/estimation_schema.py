@@ -1,16 +1,38 @@
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Any
 
 
-class WBSRow(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    owners: List[str] = Field(default_factory=list)
+class EstimationItem(BaseModel):
+    no: str = Field(default="")
+    functionality: str = Field(default="")
+    module: str = Field(default="")
+    features: str = Field(default="")
+    interface_type: str = Field(default="")
+    stack_involvement: Dict[str, Any] = Field(default_factory=dict)
     tech_remarks: str = Field(default="")
     ba_remarks: str = Field(default="")
 
+    @field_validator("no", mode="before")
+    @classmethod
+    def coerce_no_to_str(cls, v):
+        return str(v) if v is not None else ""
+
+    @field_validator("stack_involvement", mode="before")
+    @classmethod
+    def coerce_involvement_values(cls, v):
+        if not isinstance(v, dict):
+            return {}
+        # coerce any truthy/falsy value to bool
+        return {k: bool(val) for k, val in v.items()}
+
+
+class FunctionalityGroup(BaseModel):
+    letter: str = Field(default="")
+    name: str = Field(default="")
+
 
 class EstimationAgentOutput(BaseModel):
-    structural_columns: List[str] = Field(default_factory=list)
-    owner_columns: List[str] = Field(default_factory=list)
-    work_breakdown: List[WBSRow] = Field(default_factory=list)
+    functionalities: List[FunctionalityGroup] = Field(default_factory=list)
+    stack_columns: List[str] = Field(default_factory=list)
+    items: List[EstimationItem] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
