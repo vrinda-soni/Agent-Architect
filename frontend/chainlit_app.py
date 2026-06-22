@@ -188,6 +188,27 @@ def _sanitize_mermaid(diagram: str) -> str:
     return cleaned.strip()
 
 
+def _get_all_tasks(estimation) -> list:
+    """Helper to flatten the nested Functionality -> Module -> Task structure."""
+    if isinstance(estimation, dict):
+        funcs = estimation.get("functionalities") or []
+    else:
+        funcs = getattr(estimation, "functionalities", []) or []
+
+    tasks = []
+    for f in funcs:
+        f_data = f if isinstance(f, dict) else f.model_dump()
+        fname = f_data.get("name", "")
+        for m in f_data.get("modules", []):
+            mname = m.get("module", "")
+            for t in m.get("tasks", []):
+                t_dict = dict(t)
+                t_dict["functionality"] = fname
+                t_dict["module"] = mname
+                tasks.append(t_dict)
+    return tasks
+
+
 def _build_estimation_df(estimation, include_mvp: bool = False) -> pd.DataFrame:
     if isinstance(estimation, dict):
         from backend.schemas.estimation_schema import EstimationAgentOutput
@@ -197,21 +218,26 @@ def _build_estimation_df(estimation, include_mvp: bool = False) -> pd.DataFrame:
             return pd.DataFrame({"Error": ["Invalid estimation format"]})
 
     stack_cols = estimation.stack_columns or []
-    fixed_start = ["No", "Functionality Type", "Module", "Features", "Interface Type"]
+    fixed_start = ["No", "Functionality Type", "Module", "Task", "Sub-tasks", "Features", "Interface Type"]
     fixed_end   = ["Complexity", "Tech Remarks", "BA Remarks"]
-    all_cols    = fixed_start + stack_cols + fixed_end
+    all_cols    = fixed_start + stack_cols + ["Estimated Hours", "Is MVP"] + fixed_end
 
     rows = []
-    for item in (estimation.items or []):
+    for item in _get_all_tasks(estimation):
         data = item if isinstance(item, dict) else item.model_dump()
         involvement = data.get("stack_involvement") or {}
+        sub_tasks = data.get("sub_tasks") or []
         row = {
             "No":               data.get("no", ""),
             "Functionality Type": data.get("functionality", ""),
             "Module":           data.get("module", ""),
+            "Task":             data.get("task", ""),
+            "Sub-tasks":        "\n".join(f"• {s}" for s in sub_tasks),
             "Features":         data.get("features", ""),
             "Interface Type":   data.get("interface_type", ""),
-            "Complexity":       "",
+            "Estimated Hours":  data.get("estimated_hours", 0),
+            "Is MVP":           "Yes" if data.get("is_mvp", True) else "No",
+            "Complexity":       data.get("complexity", ""),
             "Tech Remarks":     data.get("tech_remarks", ""),
             "BA Remarks":       "",
         }
@@ -330,14 +356,17 @@ def _estimation_output_to_text(estimation) -> str:
             return ""
     lines = ["=== Work Breakdown Structure ==="]
     stack_cols = estimation.stack_columns or []
-    for item in (estimation.items or []):
+    for item in _get_all_tasks(estimation):
         data = item if isinstance(item, dict) else item.model_dump()
         involvement = data.get("stack_involvement") or {}
         active = [c for c in stack_cols if involvement.get(c)]
+        sub_tasks = data.get("sub_tasks") or []
+        sub_txt = ("; ".join(sub_tasks)) if sub_tasks else ""
         lines.append(
-            f"[{data.get('no','')}] {data.get('functionality','')} > {data.get('module','')} "
+            f"[{data.get('no','')}] {data.get('functionality','')} > {data.get('module','')} > {data.get('task','')} "
             f"| {data.get('features','')} "
-            f"| Interface: {data.get('interface_type','')} "
+            + (f"| Sub-tasks: {sub_txt} " if sub_txt else "")
+            + f"| Interface: {data.get('interface_type','')} "
             f"| Stacks: {', '.join(active)} "
             f"| Remarks: {data.get('tech_remarks','')}"
         )
@@ -844,12 +873,13 @@ async def _show_estimation_result(s: dict) -> None:
             await cl.Message(content=f"⚠️ Could not display estimation — format error: {e}").send()
             return
 
-    total   = len(est.items or [])
+    all_tasks = _get_all_tasks(est)
+    total   = len(all_tasks)
     stacks  = est.stack_columns or []
     funcs   = est.functionalities or []
 
     # ── Summary card ──────────────────────────────────────────────────────────
-    summary = [f"### 📋 Work Breakdown Structure — {total} modules\n"]
+    summary = [f"### 📋 Work Breakdown Structure — {total} tasks\n"]
     if funcs:
         summary.append("**Functionalities:**")
         for f in funcs:
@@ -876,12 +906,14 @@ async def _show_estimation_result(s: dict) -> None:
             f"{col}:✓" if row.get(col) == "✓" else f"{col}:·"
             for col in stacks
         )
-        preview_lines.append(f"  {str(row.get('No','')):6}  {str(row.get('Module',''))[:35]:35}  {marks}  [{row.get('Interface Type','')}]")
+        hours = str(row.get('Estimated Hours', 0)) + 'h'
+        comp = str(row.get('Complexity', ''))
+        preview_lines.append(f"  {str(row.get('No','')):8}  {label[:45]:45} {hours:>4} {comp[:4]:4}  {marks}  [{row.get('Interface Type','')}]")
         count += 1
     preview_lines.append("```")
     await cl.Message(content="\n".join(preview_lines)).send()
     if total > 40:
-        await cl.Message(content=f"*Showing first 40 of {total} modules — full table in the Excel download.*").send()
+        await cl.Message(content=f"*Showing first 40 of {total} tasks — full table in the Excel download.*").send()
 
     # ── Assumptions ───────────────────────────────────────────────────────────
     if est.assumptions:
@@ -930,9 +962,10 @@ async def _show_estimation_result(s: dict) -> None:
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
 
             # Column widths
-            col_widths = {"No": 8, "Functionality Type": 28, "Module": 28,
-                          "Features": 55, "Interface Type": 22,
-                          "Complexity": 14, "Tech Remarks": 45, "BA Remarks": 30}
+            col_widths = {"No": 9, "Functionality Type": 26, "Module": 24,
+                          "Task": 28, "Sub-tasks": 45,
+                          "Features": 50, "Interface Type": 20,
+                          "Complexity": 14, "Tech Remarks": 42, "BA Remarks": 28}
             for col_idx, col_name in enumerate(df.columns, start=1):
                 width = col_widths.get(col_name, 14)
                 ws.column_dimensions[get_column_letter(col_idx)].width = width
@@ -1143,10 +1176,10 @@ async def _show_report_result(s: dict) -> None:
             except Exception:
                 est_obj = None
     if est_obj:
-        wbs   = est_obj.items or []
+        wbs   = _get_all_tasks(est_obj)
         funcs = est_obj.functionalities or []
         stacks = est_obj.stack_columns or []
-        est_lines = ["### 📊 Work Breakdown Summary\n", f"**Total modules: {len(wbs)}**"]
+        est_lines = ["### 📊 Work Breakdown Summary\n", f"**Total tasks: {len(wbs)}**"]
         if funcs:
             func_names = [
                 (f if isinstance(f, dict) else f.model_dump()).get("name", "")
@@ -1886,7 +1919,8 @@ async def on_run_estimation(action: cl.Action):
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            step.output = f"Generated {len(result.items)} work items"
+            all_res_tasks = _get_all_tasks(result)
+            step.output = f"Generated {len(all_res_tasks)} work items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation Agent failed: {e}").send()
@@ -1950,7 +1984,8 @@ async def on_hitl3_regen(action: cl.Action):
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-            step.output = f"Generated {len(result.items)} work items"
+            all_res_tasks = _get_all_tasks(result)
+            step.output = f"Regenerated {len(all_res_tasks)} work items"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Estimation regeneration failed: {e}").send()
