@@ -51,6 +51,7 @@ Return your response as a valid JSON object with this EXACT structure:
     "architecture_type": "...",
     "tech_stack": {{
         "category_name": "specific technology",
+        "category_name language": "primary programming language",
         ...
     }},
     "recommendation_reason": {{
@@ -68,7 +69,6 @@ Return your response as a valid JSON object with this EXACT structure:
             "url": "..."
         }}
     ],
-    "mermaid_diagram": "",
     "excalidraw_diagram": {{
         "nodes": [
             {{"id": "ui",       "label": "User Interface",  "type": "box",      "layer": 0}},
@@ -88,9 +88,9 @@ Return your response as a valid JSON object with this EXACT structure:
 
 Rules:
 - tech_stack categories are DYNAMIC — use whatever categories make sense for this project.
-- recommendation_reason keys MUST match tech_stack keys exactly.
+- For each tech_stack category, add a matching "<category> language" key with the primary programming language (e.g., "backend language": "Python", "frontend language": "TypeScript"). If no language applies (e.g., a SaaS tool), use "N/A".
+- recommendation_reason keys MUST match the base tech_stack keys only (not the language keys).
 - reference_docs: Include real, valid documentation URLs relevant to the chosen stack.
-- mermaid_diagram: Leave as empty string "".
 - excalidraw_diagram: Generate a proper node/edge architecture diagram for THIS project.
   - nodes: 5-10 BUSINESS-LEVEL components (not framework names). Each node needs: id (short slug), label (2-4 words), type (box/database/decision/circle), layer (0=leftmost/client, increasing towards right/external).
   - edges: Connect nodes with directional relationships. Each edge needs: from, to, label (short action like "HTTP", "query", "invoke", "stream").

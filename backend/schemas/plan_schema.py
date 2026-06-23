@@ -31,7 +31,7 @@ class PlanningAgentOutput(BaseModel):
         default_factory=dict,
         description="A mapping of technology categories (e.g., 'frontend', 'backend', 'database') to the chosen technology."
     )
-    
+
     recommendation_reason: Dict[str, str] = Field(
         default_factory=dict,
         description="A mapping of technology categories to the specific reason why they were chosen."
@@ -47,11 +47,6 @@ class PlanningAgentOutput(BaseModel):
         description="A list of relevant documentation links."
     )
     
-    mermaid_diagram: str = Field(
-        default="",
-        description="Legacy mermaid diagram (kept for backward compatibility)."
-    )
-
     excalidraw_diagram: dict = Field(
         default_factory=dict,
         description="Architecture diagram as node/edge format for Excalidraw rendering."

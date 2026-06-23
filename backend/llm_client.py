@@ -117,6 +117,23 @@ FALLBACK_MODELS = [
 
 
 # -----------------------------------------------------------------
+# Gemini streaming
+# -----------------------------------------------------------------
+def stream_gemini(prompt: str):
+    """Yield text tokens from Gemini. Raises on any error (caller falls back)."""
+    if not _gemini_client or not GEMINI_API_KEY:
+        raise ValueError("Gemini API key not set.")
+    response = _gemini_client.models.generate_content_stream(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(),
+    )
+    for chunk in response:
+        if chunk.text:
+            yield chunk.text
+
+
+# -----------------------------------------------------------------
 # Helper to detect quota / rate-limit errors
 # -----------------------------------------------------------------
 def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
@@ -291,13 +308,13 @@ def _call_gemini(prompt: str, use_search: bool = False, generation=None, max_tok
 # Large-output agents need more time; others fail fast so next model can be tried
 # -----------------------------------------------------------------
 _AGENT_OPENROUTER_TIMEOUT: dict[str, int] = {
-    "estimation_agent": 90,
-    "report_agent":     90,
-    "task_agent":       60,
-    "planning_agent":   60,
-    "feasibility_agent": 60,
+    "estimation_agent":  600,
+    "report_agent":      600,
+    "task_agent":        300,
+    "planning_agent":    300,
+    "feasibility_agent": 300,
 }
-_DEFAULT_OPENROUTER_TIMEOUT = 45
+_DEFAULT_OPENROUTER_TIMEOUT = 120
 
 
 def _try_openrouter_parallel(
@@ -398,11 +415,12 @@ def generate_with_fallback(
     # Use provided trace or create a standalone one
     active_trace = trace or create_trace(name=agent_name, metadata={"prompt_len": len(prompt)})
 
-    # Agents that we want to explicitly skip Gemini for (to avoid the 60s quota failure penalty)
-    _BYPASS_GEMINI_AGENTS = {"estimation_agent", "planning_agent"}
+    # QA agents use Gemini (streaming). All others go straight to OpenRouter/Nvidia
+    # to avoid the 60s timeout penalty when Gemini hits its output token limit.
+    _GEMINI_ONLY_AGENTS = {"qa_agent", "query_expander"}
 
-    # Try Gemini first
-    if _gemini_client and GEMINI_API_KEY and agent_name not in _BYPASS_GEMINI_AGENTS:
+    # Try Gemini first (QA only)
+    if _gemini_client and GEMINI_API_KEY and agent_name in _GEMINI_ONLY_AGENTS:
         gen = None
         try:
             gen = active_trace.generation(
@@ -456,7 +474,7 @@ def generate_with_fallback(
     # Fallback chain through OpenRouter models (agent-specific or default)
     fallback_list = _AGENT_FALLBACKS.get(agent_name, FALLBACK_MODELS)
     or_timeout = _AGENT_OPENROUTER_TIMEOUT.get(agent_name, _DEFAULT_OPENROUTER_TIMEOUT)
-    print(f"[LLM] Gemini quota hit for '{agent_name}'. Trying {len(fallback_list)} OpenRouter fallbacks in parallel batches (timeout={or_timeout}s each)...")
+    print(f"[LLM] Trying {len(fallback_list)} OpenRouter fallbacks for '{agent_name}' in parallel batches (timeout={or_timeout}s each)...")
 
     try:
         result = _try_openrouter_parallel(
@@ -470,6 +488,6 @@ def generate_with_fallback(
         if trace is None:
             flush()
         raise ValueError(
-            f"All models failed (Gemini + {len(fallback_list)} OpenRouter fallbacks for '{agent_name}'). "
+            f"All models failed ({len(fallback_list)} OpenRouter fallbacks for '{agent_name}'). "
             f"Last error: {last_error}"
         ) from last_error

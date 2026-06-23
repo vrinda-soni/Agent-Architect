@@ -65,7 +65,13 @@ def create_trace(name: str, metadata: dict = None, user_id: str = None, session_
     if session_id:
         kwargs["session_id"] = session_id
     try:
-        return lf.trace(**kwargs)
+        # Langfuse v4+ API
+        if hasattr(lf, "start_trace"):
+            return lf.start_trace(**kwargs)
+        # Langfuse v2/v3 API fallback
+        if hasattr(lf, "trace"):
+            return lf.trace(**kwargs)
+        return _NoOpTrace()
     except Exception as e:
         print(f"[Langfuse] create_trace failed: {e}")
         return _NoOpTrace()

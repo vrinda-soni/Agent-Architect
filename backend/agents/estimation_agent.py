@@ -254,22 +254,21 @@ def _drop_incomplete(items: list) -> list:
 
 
 # -----------------------------------------------------------------
-# Two-pass estimation
+# Two-pass estimation — exposed as separate functions for progress visibility
 # -----------------------------------------------------------------
-def run_estimation_agent(
+def run_estimation_pass1(
     requirements: dict,
     plan: dict,
     feasibility: dict,
-    transcript: str = "",
-    include_mvp: bool = False,
-    rag_context: str = "",
     feedback: str = "",
+    rag_context: str = "",
     trace=None,
-) -> EstimationAgentOutput:
+) -> dict:
+    """Pass 1: identify stack, functionalities, and modules. Returns intermediate dict."""
     if not requirements or not plan or not feasibility:
         raise ValueError("Requirements, Plan, and Feasibility cannot be empty.")
 
-    span = create_span(trace, "estimation_agent", input={"include_mvp": include_mvp, "feedback": feedback})
+    span = create_span(trace, "estimation_pass1", input={"feedback": bool(feedback)})
     llm_trace = span or trace
 
     feedback_section = ""
@@ -282,10 +281,10 @@ def run_estimation_agent(
         feedback_section += f"\nADDITIONAL REFERENCE CONTEXT:\n{rag_context}\n"
 
     req_json = json.dumps(requirements, indent=2)
-    plan_json = json.dumps(plan, indent=2)
+    plan_slim = {k: v for k, v in plan.items() if k not in ("reference_docs", "excalidraw_diagram", "mermaid_diagram")}
+    plan_json = json.dumps(plan_slim, indent=2)
     feas_json = json.dumps(feasibility, indent=2)
 
-    # ── PASS 1: functionalities + modules ─────────────────────────────────────
     pass1_prompt = PASS1_PROMPT.format(
         requirements=req_json,
         plan=plan_json,
@@ -307,7 +306,6 @@ def run_estimation_agent(
     if not modules:
         raise ValueError("Estimation Agent (Pass 1): no modules were identified.")
 
-    # Group modules by functionality name (preserving Pass-1 order)
     modules_by_func: dict[str, list] = {}
     for m in modules:
         fname = (m.get("functionality") or "").strip() or "Uncategorized"
@@ -316,7 +314,34 @@ def run_estimation_agent(
     stack_list_str = ", ".join(stack_columns) if stack_columns else "Backend"
     context = f"REQUIREMENTS:\n{req_json}\n\nARCHITECTURE PLAN:\n{plan_json}"[:6000]
 
-    # ── PASS 2: decompose each functionality in parallel ──────────────────────
+    if span:
+        span.end(output={"functionalities": len(functionalities), "modules": len(modules)})
+
+    return {
+        "skeleton": skeleton,
+        "stack_columns": stack_columns,
+        "functionalities": functionalities,
+        "modules_by_func": modules_by_func,
+        "stack_list_str": stack_list_str,
+        "context": context,
+    }
+
+
+def run_estimation_pass2(
+    pass1_result: dict,
+    include_mvp: bool = False,
+    trace=None,
+) -> "EstimationAgentOutput":
+    """Pass 2: decompose each functionality into tasks in parallel. Returns final output."""
+    skeleton        = pass1_result["skeleton"]
+    stack_columns   = pass1_result["stack_columns"]
+    functionalities = pass1_result["functionalities"]
+    modules_by_func = pass1_result["modules_by_func"]
+    stack_list_str  = pass1_result["stack_list_str"]
+    context         = pass1_result["context"]
+
+    span = create_span(trace, "estimation_pass2", input={"functionalities": len(functionalities)})
+
     def _decompose(fname: str, mods: list, max_retries: int = 3) -> list:
         prompt = PASS2_PROMPT.format(
             stack_columns_list=stack_list_str,
@@ -328,7 +353,7 @@ def run_estimation_agent(
         pass2_span = create_span(span, f"pass2:{fname}") if span else None
         for attempt in range(max_retries):
             try:
-                raw = generate_with_fallback(prompt, use_search=False, trace=pass2_span or llm_trace, agent_name="estimation_agent")
+                raw = generate_with_fallback(prompt, use_search=False, trace=pass2_span, agent_name="estimation_agent")
                 items = _parse_items(raw)
                 if items:
                     if pass2_span:
@@ -361,41 +386,36 @@ def run_estimation_agent(
 
     all_items = _drop_incomplete(all_items)
 
-    # Derive stack_columns from items if Pass 1 missed any
     if not stack_columns:
         stack_columns = list({
             k for it in all_items
             for k in (it.get("stack_involvement") or {}).keys()
         })
 
-    # ── ASSEMBLE HIERARCHY ────────────────────────────────────────────────────
-    # 1. Group tasks by module name
     tasks_by_module: dict[str, list] = {}
     for task_dict in all_items:
         mname = str(task_dict.get("module") or "").strip()
         tasks_by_module.setdefault(mname, []).append(EstimationTask(**task_dict))
 
-    # 2. Build Functionality and Module objects
+    func_order = {(f.get("letter") or "").upper(): i for i, f in enumerate(functionalities)}
+
     nested_functionalities = []
     for func_dict in functionalities:
         func_name = (func_dict.get("name") or "").strip()
         func_modules = modules_by_func.get(func_name) or []
-        
+
         nested_modules = []
         for m_dict in func_modules:
             mname = (m_dict.get("module") or "").strip()
-            
-            # Sort tasks by their `no` property
             module_tasks = tasks_by_module.get(mname) or []
-            module_tasks.sort(key=lambda t: _sort_key(t.no, {}))
-            
+            module_tasks.sort(key=lambda t: _sort_key(t.no, func_order))
             nested_modules.append(EstimationModule(
                 no=str(m_dict.get("no") or ""),
                 module=mname,
                 scope=str(m_dict.get("scope") or ""),
                 tasks=module_tasks
             ))
-            
+
         nested_functionalities.append(EstimationFunctionality(
             letter=str(func_dict.get("letter") or ""),
             name=func_name,
@@ -410,3 +430,18 @@ def run_estimation_agent(
         functionalities=nested_functionalities,
         assumptions=skeleton.get("assumptions") or [],
     )
+
+
+def run_estimation_agent(
+    requirements: dict,
+    plan: dict,
+    feasibility: dict,
+    transcript: str = "",
+    include_mvp: bool = False,
+    rag_context: str = "",
+    feedback: str = "",
+    trace=None,
+) -> EstimationAgentOutput:
+    """Convenience wrapper: runs both passes sequentially."""
+    p1 = run_estimation_pass1(requirements, plan, feasibility, feedback, rag_context, trace)
+    return run_estimation_pass2(p1, include_mvp, trace)
