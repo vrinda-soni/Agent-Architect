@@ -41,7 +41,7 @@ Thumbs.db
 *.log
 *.tmp
 
-# Claude Code local settings (contains secrets)
+
 .claude/settings.local.json
 .mcp.json
 
@@ -49,3 +49,13 @@ Thumbs.db
 # Runtime logs
 backend_log.txt
 streamlit_log.txt
+
+run.ps1
+public/
+knowlede_base/
+.venv/
+backend/hitl.py
+.files/ 
+.chainlit/
+frontend/app.py 
+frontend/app.py.bak
