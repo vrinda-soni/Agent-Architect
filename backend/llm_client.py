@@ -31,8 +31,12 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
 GEMINI_MODEL = "gemini-2.0-flash"
 
 # Mistral model to use as the first fallback for specific agents
+# Note: mistral-medium-2505 supports up to 8,191 output tokens
+# planning_agent  ≈ 6,000–7,000 tokens  → safe
+# estimation_agent ≈ 7,500 tokens         → borderline, falls back to OpenRouter if exceeded
 _AGENT_MISTRAL_MODEL: dict[str, str] = {
     "estimation_agent": "mistral-medium-2505",
+    "planning_agent":   "mistral-medium-2505",
 }
 
 # Per-agent fallback chains.
@@ -302,10 +306,13 @@ def _try_openrouter_parallel(
     token_limit: int | None,
     or_timeout: int,
     batch_size: int = 3,
+    parent=None,
+    agent_name: str = "llm_call",
 ) -> str:
     """
     Try OpenRouter models in parallel batches of `batch_size`.
     Returns the first successful response; raises if all fail.
+    Each model attempt is recorded as a Langfuse generation under `parent`.
     """
     last_error: Exception | None = None
     batches = [models[i : i + batch_size] for i in range(0, len(models), batch_size)]
@@ -313,19 +320,41 @@ def _try_openrouter_parallel(
     for batch in batches:
         print(f"[LLM] Parallel batch: {[m.split('/')[0] for m in batch]}")
         winner = None
+        gens: dict = {}
         with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            future_to_model = {
-                executor.submit(_call_openrouter, prompt, m, None, token_limit, or_timeout): m
-                for m in batch
-            }
+            future_to_model = {}
+            for m in batch:
+                gen = None
+                if parent is not None:
+                    try:
+                        gen = parent.generation(
+                            name=f"{agent_name}:openrouter:{m}",
+                            model=m,
+                            input=prompt,
+                            metadata={"provider": "openrouter", "max_tokens": token_limit},
+                        )
+                    except Exception:
+                        gen = None
+                gens[m] = gen
+                future_to_model[
+                    executor.submit(_call_openrouter, prompt, m, gen, token_limit, or_timeout)
+                ] = m
+            # Let every future finish (the executor waits at block exit anyway) so we
+            # can close each generation, while keeping the FIRST success as the winner.
             for future in as_completed(future_to_model):
                 model = future_to_model[future]
                 try:
-                    winner = future.result()
-                    print(f"[LLM] OK  {model} succeeded (parallel)")
-                    break
+                    result = future.result()
+                    if winner is None:
+                        winner = result
+                        print(f"[LLM] OK  {model} succeeded (parallel)")
                 except Exception as e:
                     last_error = e
+                    if gens.get(model):
+                        try:
+                            gens[model].end(level="ERROR", status_message=str(e))
+                        except Exception:
+                            pass
                     print(f"[LLM] FAIL {model} failed: {e}")
         if winner is not None:
             return winner
@@ -369,8 +398,11 @@ def generate_with_fallback(
     # Use provided trace or create a standalone one
     active_trace = trace or create_trace(name=agent_name, metadata={"prompt_len": len(prompt)})
 
+    # Agents that we want to explicitly skip Gemini for (to avoid the 60s quota failure penalty)
+    _BYPASS_GEMINI_AGENTS = {"estimation_agent", "planning_agent"}
+
     # Try Gemini first
-    if _gemini_client and GEMINI_API_KEY:
+    if _gemini_client and GEMINI_API_KEY and agent_name not in _BYPASS_GEMINI_AGENTS:
         gen = None
         try:
             gen = active_trace.generation(
@@ -427,7 +459,10 @@ def generate_with_fallback(
     print(f"[LLM] Gemini quota hit for '{agent_name}'. Trying {len(fallback_list)} OpenRouter fallbacks in parallel batches (timeout={or_timeout}s each)...")
 
     try:
-        result = _try_openrouter_parallel(prompt, fallback_list, token_limit, or_timeout)
+        result = _try_openrouter_parallel(
+            prompt, fallback_list, token_limit, or_timeout,
+            parent=active_trace, agent_name=agent_name,
+        )
         if trace is None:
             flush()
         return result

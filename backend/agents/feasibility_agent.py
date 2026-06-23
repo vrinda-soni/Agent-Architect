@@ -3,6 +3,7 @@ import json
 from backend.schemas.feasibility_schema import FeasibilityAgentOutput
 from backend.llm_client import generate_with_fallback
 from backend.agents.json_utils import extract_json
+from backend.langfuse_client import create_span
 
 # Validate at least one API key is available
 if not os.getenv("GEMINI_API_KEY", "").strip() and not os.getenv("OPENROUTER_API_KEY", "").strip():
@@ -85,7 +86,7 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Feasibility Agent Function
 # -----------------------------------------------------------------
-def run_feasibility_agent(requirements: dict, plan: dict, feedback: str = "") -> FeasibilityAgentOutput:
+def run_feasibility_agent(requirements: dict, plan: dict, feedback: str = "", trace=None) -> FeasibilityAgentOutput:
     if not requirements or not plan:
         raise ValueError("Requirements and Plan cannot be empty.")
 
@@ -101,11 +102,15 @@ def run_feasibility_agent(requirements: dict, plan: dict, feedback: str = "") ->
         feedback_section=feedback_section,
     )
 
+    span = create_span(trace, "feasibility_agent", input={"feedback": feedback})
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=True, agent_name="feasibility_agent")
+    raw_text = generate_with_fallback(prompt, use_search=True, trace=span or trace, agent_name="feasibility_agent")
 
     # Parse the JSON response with robust extraction
     parsed = extract_json(raw_text)
 
     # Validate against Pydantic schema
-    return FeasibilityAgentOutput(**parsed)
+    result = FeasibilityAgentOutput(**parsed)
+    if span:
+        span.end(output=parsed)
+    return result

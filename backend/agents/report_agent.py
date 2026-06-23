@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from backend.schemas.report_schema import ReportAgentOutput
 from backend.llm_client import generate_with_fallback
 from backend.agents.json_utils import extract_json
+from backend.langfuse_client import create_span
 
 load_dotenv()
 
@@ -113,7 +114,7 @@ Respond with ONLY the JSON object. No markdown. No explanation. No trailing text
 """
 
 
-def run_report_agent(requirements: dict, plan: dict, feasibility: dict, estimation: dict) -> ReportAgentOutput:
+def run_report_agent(requirements: dict, plan: dict, feasibility: dict, estimation: dict, trace=None) -> ReportAgentOutput:
     """
     Compiles a 12-section consulting report from all approved agent outputs.
     Preserves all architectural decisions, feasibility values, and estimation numbers exactly.
@@ -133,8 +134,11 @@ def run_report_agent(requirements: dict, plan: dict, feasibility: dict, estimati
         estimation=_truncate(estimation),
     )
 
-    raw_text = generate_with_fallback(prompt, use_search=False, agent_name="report_agent")
+    span = create_span(trace, "report_agent")
+    raw_text = generate_with_fallback(prompt, use_search=False, trace=span or trace, agent_name="report_agent")
     parsed = extract_json(raw_text)
+    if span:
+        span.end(output={k: v for k, v in parsed.items() if k != "raw_data"})
 
     parsed["raw_data"] = {
         "requirements": requirements,

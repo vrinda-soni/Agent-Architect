@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from backend.schemas.estimation_schema import EstimationAgentOutput, EstimationFunctionality, EstimationModule, EstimationTask
 from backend.llm_client import generate_with_fallback
 from backend.agents.json_utils import extract_json
+from backend.langfuse_client import create_span
 
 load_dotenv()
 
@@ -76,7 +77,7 @@ STEP 1 — IDENTIFY STACK DISCIPLINES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Read the Architecture Plan. Identify which discipline areas this project genuinely needs.
 Choose ONLY from:
-  Frontend | Backend | AI/ML | DevOps | Cloud | Mobile | Data Engineering | QA | Security
+  Frontend | Backend | AI/ML | DevOps | Cloud | Mobile | Data Engineering | QA | Security | BA
 Output ONLY disciplines that actually exist in THIS project's tech stack as "stack_columns".
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -263,9 +264,13 @@ def run_estimation_agent(
     include_mvp: bool = False,
     rag_context: str = "",
     feedback: str = "",
+    trace=None,
 ) -> EstimationAgentOutput:
     if not requirements or not plan or not feasibility:
         raise ValueError("Requirements, Plan, and Feasibility cannot be empty.")
+
+    span = create_span(trace, "estimation_agent", input={"include_mvp": include_mvp, "feedback": feedback})
+    llm_trace = span or trace
 
     feedback_section = ""
     if feedback and feedback.strip():
@@ -287,7 +292,7 @@ def run_estimation_agent(
         feasibility=feas_json,
         feedback_section=feedback_section,
     )
-    pass1_raw = generate_with_fallback(pass1_prompt, use_search=False, agent_name="estimation_agent")
+    pass1_raw = generate_with_fallback(pass1_prompt, use_search=False, trace=llm_trace, agent_name="estimation_agent")
     try:
         skeleton = extract_json(pass1_raw)
     except Exception as e:
@@ -320,16 +325,21 @@ def run_estimation_agent(
             context=context,
             include_mvp_flag="true" if include_mvp else "false",
         )
+        pass2_span = create_span(span, f"pass2:{fname}") if span else None
         for attempt in range(max_retries):
             try:
-                raw = generate_with_fallback(prompt, use_search=False, agent_name="estimation_agent")
+                raw = generate_with_fallback(prompt, use_search=False, trace=pass2_span or llm_trace, agent_name="estimation_agent")
                 items = _parse_items(raw)
                 if items:
+                    if pass2_span:
+                        pass2_span.end(output={"items": len(items)})
                     return items
                 print(f"[EstimationAgent] Pass 2: '{fname}' returned no items (Attempt {attempt+1})")
             except Exception as e:
                 print(f"[EstimationAgent] Pass 2 failed for '{fname}' (Attempt {attempt+1}): {e}")
             time.sleep(2)
+        if pass2_span:
+            pass2_span.end(level="ERROR", status_message="no items generated")
         return []
 
     all_items: list = []
@@ -391,6 +401,9 @@ def run_estimation_agent(
             name=func_name,
             modules=nested_modules
         ))
+
+    if span:
+        span.end(output={"stack_columns": stack_columns, "functionalities": len(nested_functionalities), "tasks": len(all_items)})
 
     return EstimationAgentOutput(
         stack_columns=stack_columns,

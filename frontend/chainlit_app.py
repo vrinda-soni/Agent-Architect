@@ -33,6 +33,7 @@ from backend.rag.ingestion import ingest_document, list_project_documents, extra
 from backend.rag.retrival import retrieve_context, format_context_for_prompt
 from backend.llm_client import generate_with_fallback
 from backend.rag.cache import search_cache, store_cache
+from backend.langfuse_client import create_trace, flush
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -105,6 +106,50 @@ def _to_dict(obj) -> dict:
     if isinstance(obj, dict):
         return obj
     return obj.model_dump()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Langfuse pipeline trace — ONE trace per pipeline run, shared across all agents.
+# Stored in a dedicated session slot (NOT in `s`) so it is never serialized to DB.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _start_trace(s: dict):
+    """Begin a fresh Langfuse trace for a new pipeline run and store it on the session."""
+    proj = s.get("selected_project") or {}
+    try:
+        trace = create_trace(
+            name="poc-pipeline",
+            session_id=str(proj.get("id") or "session"),
+            metadata={"project": proj.get("name", "")},
+        )
+    except Exception as e:
+        print(f"[Langfuse] start trace failed: {e}")
+        trace = None
+    cl.user_session.set("pipeline_trace", trace)
+    return trace
+
+
+def _trace(s: dict):
+    """Return the current pipeline trace, starting one if none exists yet."""
+    t = cl.user_session.get("pipeline_trace")
+    if t is None:
+        t = _start_trace(s)
+    return t
+
+
+def _end_trace(output=None) -> None:
+    """Finalize the pipeline trace (attach overall output) and flush to Langfuse."""
+    trace = cl.user_session.get("pipeline_trace")
+    if trace is not None and output is not None:
+        try:
+            trace.update(output=output)
+        except Exception:
+            pass
+    try:
+        flush()
+    except Exception:
+        pass
+    cl.user_session.set("pipeline_trace", None)
 
 
 def _db_save(s: dict) -> None:
@@ -1460,7 +1505,7 @@ async def _handle_rag_upload(s: dict) -> None:
         content="📤 Upload reference documents (PDF, DOCX, or TXT) to enrich AI context:",
         accept=["*/*"],
         max_files=5,
-        max_size_mb=100,
+        max_size_mb=50,
         timeout=120,
     ).send()
 
@@ -1489,6 +1534,28 @@ async def _handle_rag_upload(s: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Action callbacks
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+from functools import wraps
+
+def prevent_concurrent(func):
+    @wraps(func)
+    async def wrapper(action: cl.Action, *args, **kwargs):
+        # Also quickly remove the button visually
+        try:
+            await action.remove()
+        except Exception:
+            pass
+            
+        if cl.user_session.get("is_processing"):
+            await cl.Message(content="⏳ Please wait! A task is currently running.").send()
+            return
+        cl.user_session.set("is_processing", True)
+        try:
+            return await func(action, *args, **kwargs)
+        finally:
+            cl.user_session.set("is_processing", False)
+    return wrapper
 
 @cl.action_callback("select_project")
 async def on_select_project(action: cl.Action):
@@ -1640,10 +1707,10 @@ async def on_delete_ref_doc(action: cl.Action):
 async def on_upload_new_transcript(action: cl.Action):
     s = _state()
     files = await cl.AskFileMessage(
-        content="📤 Upload transcript file(s) — PDF, DOCX, or TXT, up to 100 MB each. Multiple files will be merged:",
+        content="📤 Upload transcript file(s) — PDF, DOCX, or TXT, up to 50 MB each. Multiple files will be merged:",
         accept=["*/*"],
         max_files=5,
-        max_size_mb=100,
+        max_size_mb=50,
         timeout=120,
     ).send()
     if not files:
@@ -1666,6 +1733,7 @@ async def on_paste_new_transcript(action: cl.Action):
 # ── Task Agent ────────────────────────────────────────────────────────────────
 
 @cl.action_callback("run_task_agent")
+@prevent_concurrent
 async def on_run_task_agent(action: cl.Action):
     s          = _state()
     transcript = s["current_transcript"]
@@ -1673,10 +1741,11 @@ async def on_run_task_agent(action: cl.Action):
         await cl.Message(content="❌ No transcript found. Please upload one first.").send()
         return
 
+    trace = _start_trace(s)
     async with cl.Step(name="Task Agent", type="tool") as step:
         step.input = "Analyzing transcript with Gemini AI..."
         try:
-            result = await asyncio.to_thread(run_task_agent, transcript)
+            result = await asyncio.to_thread(partial(run_task_agent, transcript, trace=trace))
             s["task_output"] = result
             s["approved_requirements"] = None
             _reset_pipeline(s)
@@ -1700,6 +1769,7 @@ async def on_run_task_agent(action: cl.Action):
 
 
 @cl.action_callback("hitl1_approve")
+@prevent_concurrent
 async def on_hitl1_approve(action: cl.Action):
     s   = _state()
     pid = (s["selected_project"] or {}).get("id")
@@ -1710,6 +1780,7 @@ async def on_hitl1_approve(action: cl.Action):
 
     await cl.Message(content="✅ Requirements approved! Auto-running Planning & Feasibility agents…").send()
 
+    trace = _trace(s)
     # ── Planning ──────────────────────────────────────────────────────────────
     plan_result = None
     async with cl.Step(name="Planning Agent", type="tool") as step:
@@ -1717,7 +1788,7 @@ async def on_hitl1_approve(action: cl.Action):
         try:
             rag_ctx = _build_rag_context(pid, s["approved_requirements"])
             plan_result = await asyncio.to_thread(
-                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx)
+                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx, trace=trace)
             )
             s["plan_output"] = plan_result
             _save(s)
@@ -1734,7 +1805,7 @@ async def on_hitl1_approve(action: cl.Action):
             step.input = "Assessing technical feasibility..."
             try:
                 feas = await asyncio.to_thread(
-                    partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump())
+                    partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump(), trace=trace)
                 )
                 s["feasibility_output"] = feas
                 _save(s)
@@ -1753,6 +1824,7 @@ async def on_hitl1_approve(action: cl.Action):
 
 
 @cl.action_callback("hitl1_regen")
+@prevent_concurrent
 async def on_hitl1_regen(action: cl.Action):
     s = _state()
     res = await cl.AskUserMessage(
@@ -1770,7 +1842,7 @@ async def on_hitl1_regen(action: cl.Action):
         step.input = f"Feedback: {feedback or 'none'}"
         try:
             result = await asyncio.to_thread(
-                partial(run_task_agent, s["current_transcript"], feedback=feedback)
+                partial(run_task_agent, s["current_transcript"], feedback=feedback, trace=_trace(s))
             )
             s["task_output"] = result
             s["approved_requirements"] = None
@@ -1792,6 +1864,7 @@ async def on_hitl1_regen(action: cl.Action):
 # ── HITL #2 ───────────────────────────────────────────────────────────────────
 
 @cl.action_callback("hitl2_approve")
+@prevent_concurrent
 async def on_hitl2_approve(action: cl.Action):
     s = _state()
     s["approved_plan"]        = _to_dict(s["plan_output"])
@@ -1802,6 +1875,7 @@ async def on_hitl2_approve(action: cl.Action):
 
 
 @cl.action_callback("hitl2_regen_plan")
+@prevent_concurrent
 async def on_hitl2_regen_plan(action: cl.Action):
     s = _state()
     res = await cl.AskUserMessage(
@@ -1822,7 +1896,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
         try:
             rag_ctx = _build_rag_context(pid, s["approved_requirements"])
             plan_result = await asyncio.to_thread(
-                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx, feedback=feedback)
+                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx, feedback=feedback, trace=_trace(s))
             )
             s["plan_output"] = plan_result
             s["feasibility_output"] = None
@@ -1842,7 +1916,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
         step.input = "Re-running feasibility on updated plan..."
         try:
             feas = await asyncio.to_thread(
-                partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump())
+                partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump(), trace=_trace(s))
             )
             s["feasibility_output"] = feas
             _save(s)
@@ -1858,6 +1932,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
 
 
 @cl.action_callback("hitl2_rerun_feas")
+@prevent_concurrent
 async def on_hitl2_rerun_feas(action: cl.Action):
     s = _state()
     res = await cl.AskUserMessage(
@@ -1876,7 +1951,7 @@ async def on_hitl2_rerun_feas(action: cl.Action):
         try:
             result = await asyncio.to_thread(
                 partial(run_feasibility_agent, s["approved_requirements"],
-                        _to_dict(s["plan_output"]), feedback=feedback)
+                        _to_dict(s["plan_output"]), feedback=feedback, trace=_trace(s))
             )
             s["feasibility_output"] = result
             s["approved_feasibility"] = s["estimation_output"] = s["approved_estimation"] = s["report_output"] = None
@@ -1899,6 +1974,7 @@ async def on_hitl2_rerun_feas(action: cl.Action):
 
 
 @cl.action_callback("run_estimation")
+@prevent_concurrent
 async def on_run_estimation(action: cl.Action):
     s       = _state()
     pid     = (s["selected_project"] or {}).get("id")
@@ -1924,6 +2000,7 @@ async def on_run_estimation(action: cl.Action):
                 transcript=s.get("current_transcript", ""),
                 include_mvp=inc_mvp,
                 rag_context=rag_context,
+                trace=_trace(s),
             ))
             s["estimation_output"] = result
             s["approved_estimation"] = s["report_output"] = None
@@ -1944,6 +2021,7 @@ async def on_run_estimation(action: cl.Action):
 # ── HITL #3 ───────────────────────────────────────────────────────────────────
 
 @cl.action_callback("hitl3_approve")
+@prevent_concurrent
 async def on_hitl3_approve(action: cl.Action):
     s = _state()
     s["approved_estimation"] = _to_dict(s["estimation_output"])
@@ -1954,6 +2032,7 @@ async def on_hitl3_approve(action: cl.Action):
 
 
 @cl.action_callback("hitl3_regen")
+@prevent_concurrent
 async def on_hitl3_regen(action: cl.Action):
     s = _state()
     res = await cl.AskUserMessage(
@@ -1989,6 +2068,7 @@ async def on_hitl3_regen(action: cl.Action):
                 include_mvp=inc_mvp,
                 rag_context=rag_context,
                 feedback=feedback,
+                trace=_trace(s),
             ))
             s["estimation_output"] = result
             s["approved_estimation"] = s["report_output"] = None
@@ -2041,6 +2121,7 @@ async def on_download_docx(action: cl.Action):
 
 
 @cl.action_callback("generate_report")
+@prevent_concurrent
 async def on_generate_report(action: cl.Action):
     s    = _state()
     req  = s["approved_requirements"] or _to_dict(s.get("task_output"))
@@ -2056,13 +2137,16 @@ async def on_generate_report(action: cl.Action):
     async with cl.Step(name="Report Agent", type="tool") as step:
         step.input = "Generating 11-section consulting report..."
         try:
-            result = await asyncio.to_thread(partial(run_report_agent, req, plan, feas, est))
+            result = await asyncio.to_thread(partial(run_report_agent, req, plan, feas, est, trace=_trace(s)))
             s["report_output"] = result.model_dump()
             _save(s)
             step.output = "Report generated successfully"
+            # Pipeline complete — attach overall output and flush the single trace.
+            _end_trace(output={"report_sections": list((s["report_output"] or {}).keys())})
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Report generation failed: {e}").send()
+            _end_trace()
             return
 
     await _show_report_result(s)

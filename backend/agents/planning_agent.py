@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from backend.schemas.plan_schema import PlanningAgentOutput
 from backend.llm_client import generate_with_fallback
 from backend.agents.json_utils import extract_json
+from backend.langfuse_client import create_span
 
 # Load environment variables
 load_dotenv()
@@ -111,7 +112,7 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Planning Agent Function
 # -----------------------------------------------------------------
-def run_planning_agent(requirements: dict, rag_context: str = "", feedback: str = "") -> PlanningAgentOutput:
+def run_planning_agent(requirements: dict, rag_context: str = "", feedback: str = "", trace=None) -> PlanningAgentOutput:
     if not requirements:
         raise ValueError("Requirements cannot be empty.")
 
@@ -128,11 +129,15 @@ def run_planning_agent(requirements: dict, rag_context: str = "", feedback: str 
         rag_section=rag_section,
     )
 
+    span = create_span(trace, "planning_agent", input={"feedback": feedback, "rag": bool(rag_context)})
     # Call LLM with fallback (Gemini + Google Search -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=True, agent_name="planning_agent")
+    raw_text = generate_with_fallback(prompt, use_search=True, trace=span or trace, agent_name="planning_agent")
 
     # Parse the JSON response with robust extraction
     parsed = extract_json(raw_text)
 
     # Validate against Pydantic schema
-    return PlanningAgentOutput(**parsed)
+    result = PlanningAgentOutput(**parsed)
+    if span:
+        span.end(output=parsed)
+    return result

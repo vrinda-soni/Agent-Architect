@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from backend.schemas.task_schema import TaskAgentOutput
 from backend.llm_client import generate_with_fallback
 from backend.agents.json_utils import extract_json
+from backend.langfuse_client import create_span
 
 # Load environment variables
 load_dotenv()
@@ -87,7 +88,7 @@ Respond with ONLY the JSON object, nothing else.
 # -----------------------------------------------------------------
 # Task Agent Function
 # -----------------------------------------------------------------
-def run_task_agent(transcript: str, feedback: str = "") -> TaskAgentOutput:
+def run_task_agent(transcript: str, feedback: str = "", trace=None) -> TaskAgentOutput:
     if not transcript or not transcript.strip():
         raise ValueError("Transcript cannot be empty.")
 
@@ -101,12 +102,16 @@ def run_task_agent(transcript: str, feedback: str = "") -> TaskAgentOutput:
         transcript=transcript.strip(),
         feedback_section=feedback_section,
     )
- 
+
+    span = create_span(trace, "task_agent", input={"transcript_chars": len(transcript), "feedback": feedback})
     # Call LLM with fallback (Gemini -> OpenRouter)
-    raw_text = generate_with_fallback(prompt, use_search=False, agent_name="task_agent")
-    
+    raw_text = generate_with_fallback(prompt, use_search=False, trace=span or trace, agent_name="task_agent")
+
     # Parse the JSON response with robust extraction
     parsed = extract_json(raw_text)
- 
+
     # Validate against Pydantic schema
-    return TaskAgentOutput(**parsed)
+    result = TaskAgentOutput(**parsed)
+    if span:
+        span.end(output=parsed)
+    return result

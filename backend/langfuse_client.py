@@ -5,7 +5,7 @@ Singleton Langfuse client for observability and debugging.
 Provides trace/span helpers used across all agents and the LLM client.
 
 Usage:
-    from backend.langfuse_client import get_langfuse, create_trace, create_generation
+    from backend.langfuse_client import get_langfuse, create_trace, create_span, flush
 
 Set in .env:
     LANGFUSE_PUBLIC_KEY=pk-lf-...
@@ -69,6 +69,25 @@ def create_trace(name: str, metadata: dict = None, user_id: str = None, session_
     except Exception as e:
         print(f"[Langfuse] create_trace failed: {e}")
         return _NoOpTrace()
+
+
+def create_span(parent, name: str, input=None, metadata: dict = None):
+    """
+    Create a child span under a trace (or another span). Returns the span object,
+    or None when no parent is given — so callers can fall back to standalone tracing.
+    """
+    if parent is None:
+        return None
+    try:
+        kwargs = {"name": name}
+        if input is not None:
+            kwargs["input"] = input
+        if metadata:
+            kwargs["metadata"] = metadata
+        return parent.span(**kwargs)
+    except Exception as e:
+        print(f"[Langfuse] create_span failed: {e}")
+        return _NoOpSpan()
 
 
 def flush():
