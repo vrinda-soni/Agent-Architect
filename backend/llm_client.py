@@ -312,6 +312,7 @@ def _try_openrouter_parallel(
 
     for batch in batches:
         print(f"[LLM] Parallel batch: {[m.split('/')[0] for m in batch]}")
+        winner = None
         with ThreadPoolExecutor(max_workers=len(batch)) as executor:
             future_to_model = {
                 executor.submit(_call_openrouter, prompt, m, None, token_limit, or_timeout): m
@@ -320,12 +321,14 @@ def _try_openrouter_parallel(
             for future in as_completed(future_to_model):
                 model = future_to_model[future]
                 try:
-                    result = future.result()
-                    print(f"[LLM] ✅ {model} succeeded (parallel)")
-                    return result
+                    winner = future.result()
+                    print(f"[LLM] OK  {model} succeeded (parallel)")
+                    break
                 except Exception as e:
                     last_error = e
-                    print(f"[LLM] ❌ {model} failed: {e}")
+                    print(f"[LLM] FAIL {model} failed: {e}")
+        if winner is not None:
+            return winner
 
     raise ValueError(f"All parallel OpenRouter fallbacks failed. Last: {last_error}") from last_error
 
@@ -406,12 +409,12 @@ def generate_with_fallback(
                 metadata={"provider": "mistral", "max_tokens": token_limit},
             )
             result = _call_mistral(prompt, model=mistral_model, generation=gen, max_tokens=token_limit)
-            print(f"[LLM] ✅ Mistral ({mistral_model}) succeeded for '{agent_name}'")
+            print(f"[LLM] OK  Mistral ({mistral_model}) succeeded for '{agent_name}'")
             if trace is None:
                 flush()
             return result
         except Exception as e:
-            print(f"[LLM] ❌ Mistral ({mistral_model}) failed: {e}")
+            print(f"[LLM] FAIL Mistral ({mistral_model}) failed: {e}")
             if gen:
                 try:
                     gen.end(level="ERROR", status_message=str(e))

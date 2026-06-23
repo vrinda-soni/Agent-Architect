@@ -113,7 +113,7 @@ def _embed_gemini(text: str) -> list[float]:
     from google.genai.types import EmbedContentConfig
     client = _gemini_client()
     result = client.models.embed_content(
-        model="models/text-embedding-004",
+        model="models/gemini-embedding-001",
         contents=text,
         config=EmbedContentConfig(output_dimensionality=768),  # match Supabase pgvector dim
     )

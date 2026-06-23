@@ -5,6 +5,12 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+# Force UTF-8 output on Windows (prevents charmap errors from emoji in logs)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import asyncio
 import io
 import re
@@ -493,7 +499,9 @@ async def _qa_answer(s: dict, question: str) -> None:
         )
         try:
             expand_raw = await asyncio.to_thread(partial(generate_with_fallback, expand_prompt, agent_name="query_expander"))
-            extra_queries = _json.loads(expand_raw.strip().strip("```json").strip("```").strip())
+            expand_raw = re.sub(r"^```(?:json)?\s*", "", expand_raw.strip(), flags=re.MULTILINE)
+            expand_raw = re.sub(r"\s*```$", "", expand_raw.strip(), flags=re.MULTILINE)
+            extra_queries = _json.loads(expand_raw.strip())
             if isinstance(extra_queries, list):
                 all_queries = [question] + extra_queries[:2]
         except Exception:
@@ -908,7 +916,8 @@ async def _show_estimation_result(s: dict) -> None:
         )
         hours = str(row.get('Estimated Hours', 0)) + 'h'
         comp = str(row.get('Complexity', ''))
-        preview_lines.append(f"  {str(row.get('No','')):8}  {label[:45]:45} {hours:>4} {comp[:4]:4}  {marks}  [{row.get('Interface Type','')}]")
+        task_label = str(row.get('Task', ''))
+        preview_lines.append(f"  {str(row.get('No','')):8}  {task_label[:45]:45} {hours:>4} {comp[:4]:4}  {marks}  [{row.get('Interface Type','')}]")
         count += 1
     preview_lines.append("```")
     await cl.Message(content="\n".join(preview_lines)).send()
@@ -1462,9 +1471,11 @@ async def _handle_rag_upload(s: dict) -> None:
     for f in files:
         try:
             path = getattr(f, "path", None)
-            content = open(path, "rb").read() if path else (
-                f.content if isinstance(f.content, bytes) else f.content.encode()
-            )
+            if path:
+                with open(path, "rb") as _f:
+                    content = _f.read()
+            else:
+                content = f.content if isinstance(f.content, bytes) else f.content.encode()
             ext = f.name.rsplit(".", 1)[-1].lower() if "." in f.name else "txt"
             res = await asyncio.to_thread(partial(ingest_document, project["id"], content, f.name, ext))
             if res["success"]:
