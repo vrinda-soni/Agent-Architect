@@ -47,8 +47,8 @@ _AGENT_MISTRAL_MODEL: dict[str, str] = {
 #   - default:          safe full chain used for any agent not listed below
 _AGENT_FALLBACKS: dict[str, list[str]] = {
     "task_agent": [
-        "nvidia/nemotron-3-super-120b-a12b:free",
         "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "qwen/qwen3-coder:free",
         "nousresearch/hermes-3-llama-3.1-405b:free",
@@ -85,8 +85,8 @@ _AGENT_FALLBACKS: dict[str, list[str]] = {
     ],
     "report_agent": [
         # All have large output caps — safe for long report generation
-        "nvidia/nemotron-3-super-120b-a12b:free",
         "openai/gpt-oss-120b:free",
+        "nvidia/nemotron-3-super-120b-a12b:free",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "qwen/qwen3-coder:free",
         "nousresearch/hermes-3-llama-3.1-405b:free",
@@ -103,6 +103,12 @@ _AGENT_FALLBACKS: dict[str, list[str]] = {
         "meta-llama/llama-3.3-70b-instruct:free",
     ],
 }
+
+# Agents that MUST try gpt-oss-120b first (sequentially, on its own) before
+# falling back to the parallel chain. This makes gpt-oss the deterministic
+# primary model for these agents instead of "whichever parallel model wins".
+_GPT_OSS_MODEL = "openai/gpt-oss-120b:free"
+_GPT_OSS_FIRST_AGENTS = {"task_agent", "feasibility_agent", "report_agent"}
 
 # Default fallback chain for any agent not listed above
 FALLBACK_MODELS = [
@@ -338,43 +344,44 @@ def _try_openrouter_parallel(
         print(f"[LLM] Parallel batch: {[m.split('/')[0] for m in batch]}")
         winner = None
         gens: dict = {}
-        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            future_to_model = {}
-            for m in batch:
-                gen = None
-                if parent is not None:
-                    try:
-                        gen = parent.generation(
-                            name=f"{agent_name}:openrouter:{m}",
-                            model=m,
-                            input=prompt,
-                            metadata={"provider": "openrouter", "max_tokens": token_limit},
-                        )
-                    except Exception:
-                        gen = None
-                gens[m] = gen
-                future_to_model[
-                    executor.submit(_call_openrouter, prompt, m, gen, token_limit, or_timeout)
-                ] = m
-            # Let every future finish (the executor waits at block exit anyway) so we
-            # can close each generation, while keeping the FIRST success as the winner.
-            for future in as_completed(future_to_model):
-                model = future_to_model[future]
+        executor = ThreadPoolExecutor(max_workers=len(batch))
+        future_to_model = {}
+        for m in batch:
+            gen = None
+            if parent is not None:
                 try:
-                    result = future.result()
-                    if winner is None:
-                        winner = result
-                        print(f"[LLM] OK  {model} succeeded (parallel)")
-                except Exception as e:
-                    last_error = e
-                    if gens.get(model):
-                        try:
-                            gens[model].end(level="ERROR", status_message=str(e))
-                        except Exception:
-                            pass
-                    print(f"[LLM] FAIL {model} failed: {e}")
-        if winner is not None:
-            return winner
+                    gen = parent.generation(
+                        name=f"{agent_name}:openrouter:{m}",
+                        model=m,
+                        input=prompt,
+                        metadata={"provider": "openrouter", "max_tokens": token_limit},
+                    )
+                except Exception:
+                    gen = None
+            gens[m] = gen
+            future_to_model[
+                executor.submit(_call_openrouter, prompt, m, gen, token_limit, or_timeout)
+            ] = m
+            
+        for future in as_completed(future_to_model):
+            model = future_to_model[future]
+            try:
+                result = future.result()
+                print(f"[LLM] OK  {model} succeeded (parallel)")
+                # Return immediately without waiting for other slow/failing models!
+                executor.shutdown(wait=False, cancel_futures=True)
+                return result
+            except Exception as e:
+                last_error = e
+                if gens.get(model):
+                    try:
+                        gens[model].end(level="ERROR", status_message=str(e))
+                    except Exception:
+                        pass
+                print(f"[LLM] FAIL {model} failed: {e}")
+                
+        # Clean up executor if all in this batch failed
+        executor.shutdown(wait=False, cancel_futures=True)
 
     raise ValueError(f"All parallel OpenRouter fallbacks failed. Last: {last_error}") from last_error
 
@@ -471,9 +478,38 @@ def generate_with_fallback(
                 except Exception:
                     pass
 
+    or_timeout = _AGENT_OPENROUTER_TIMEOUT.get(agent_name, _DEFAULT_OPENROUTER_TIMEOUT)
+
+    # For selected agents, try gpt-oss-120b first on its own (sequentially).
+    # Only if it fails do we fall back to the parallel chain below.
+    if agent_name in _GPT_OSS_FIRST_AGENTS and OPENROUTER_API_KEY:
+        gen = None
+        try:
+            print(f"[LLM] Trying gpt-oss-120b first for '{agent_name}'...")
+            gen = active_trace.generation(
+                name=f"{agent_name}:openrouter:{_GPT_OSS_MODEL}",
+                model=_GPT_OSS_MODEL,
+                input=prompt,
+                metadata={"provider": "openrouter", "max_tokens": token_limit, "priority": "first"},
+            )
+            result = _call_openrouter(prompt, _GPT_OSS_MODEL, gen, token_limit, or_timeout)
+            print(f"[LLM] OK  gpt-oss-120b succeeded (first) for '{agent_name}'")
+            if trace is None:
+                flush()
+            return result
+        except Exception as e:
+            print(f"[LLM] FAIL gpt-oss-120b (first) failed: {e} — falling back to parallel chain")
+            if gen:
+                try:
+                    gen.end(level="ERROR", status_message=str(e))
+                except Exception:
+                    pass
+
     # Fallback chain through OpenRouter models (agent-specific or default)
     fallback_list = _AGENT_FALLBACKS.get(agent_name, FALLBACK_MODELS)
-    or_timeout = _AGENT_OPENROUTER_TIMEOUT.get(agent_name, _DEFAULT_OPENROUTER_TIMEOUT)
+    # Avoid retrying gpt-oss when it was already tried first and failed
+    if agent_name in _GPT_OSS_FIRST_AGENTS:
+        fallback_list = [m for m in fallback_list if m != _GPT_OSS_MODEL]
     print(f"[LLM] Trying {len(fallback_list)} OpenRouter fallbacks for '{agent_name}' in parallel batches (timeout={or_timeout}s each)...")
 
     try:

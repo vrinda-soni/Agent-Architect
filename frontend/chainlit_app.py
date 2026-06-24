@@ -802,13 +802,15 @@ async def _show_hitl1(s: dict) -> None:
     lines.append("#### 🧑‍💼 Human-in-the-Loop Review")
     lines.append("Click **✅ Approve** to continue, or **🔄 Regenerate** — which will ask what to change before re-running.")
 
-    await cl.Message(
-        content="\n".join(lines),
+    content = "\n".join(lines)
+    msg = await cl.Message(
+        content=content,
         actions=[
             cl.Action(name="hitl1_approve", payload={}, label="✅ Approve & Auto-Run"),
             cl.Action(name="hitl1_regen",   payload={}, label="🔄 Regenerate"),
         ],
     ).send()
+    cl.user_session.set("hitl1_msg_id", {"id": msg.id, "content": content})
 
 
 # ── Step 3: Planning Agent ────────────────────────────────────────────────────
@@ -920,14 +922,16 @@ async def _show_hitl2(s: dict) -> None:
         "Click **✅ Approve** to move to Estimation, or click a **Regenerate** button — it will ask what to change.",
     ]
 
-    await cl.Message(
-        content="\n".join(summary_lines),
+    content = "\n".join(summary_lines)
+    msg = await cl.Message(
+        content=content,
         actions=[
             cl.Action(name="hitl2_approve",    payload={}, label="✅ Approve Plan & Feasibility"),
             cl.Action(name="hitl2_regen_plan",  payload={}, label="🔄 Regenerate Plan"),
             cl.Action(name="hitl2_rerun_feas",  payload={}, label="🔁 Re-run Feasibility"),
         ],
     ).send()
+    cl.user_session.set("hitl2_msg_id", {"id": msg.id, "content": content})
 
 
 # ── Step 5: Estimation Agent ──────────────────────────────────────────────────
@@ -1082,17 +1086,19 @@ async def _show_hitl3(s: dict) -> None:
     """Mirrors inline HITL #3 block in render_dashboard (Step 6)."""
     s["step"] = "hitl3"
     _save(s)
-    await cl.Message(
-        content=(
-            "### HITL #3 — Review Estimation\n\n"
-            "Review the effort estimation table above.\n\n"
-            "Click **✅ Approve** to proceed to Report, or **📊 Regenerate** — it will ask what to change first."
-        ),
+    content = (
+        "### HITL #3 — Review Estimation\n\n"
+        "Review the effort estimation table above.\n\n"
+        "Click **✅ Approve** to proceed to Report, or **📊 Regenerate** — it will ask what to change first."
+    )
+    msg = await cl.Message(
+        content=content,
         actions=[
             cl.Action(name="hitl3_approve", payload={}, label="✅ Approve Estimation"),
             cl.Action(name="hitl3_regen",   payload={}, label="📊 Regenerate Estimation"),
         ],
     ).send()
+    cl.user_session.set("hitl3_msg_id", {"id": msg.id, "content": content})
 
 
 # ── Step 7: Report ────────────────────────────────────────────────────────────
@@ -1281,25 +1287,30 @@ async def _show_report_result(s: dict) -> None:
         await cl.Message(content="\n".join(est_lines)).send()
 
     # ── Downloads ─────────────────────────────────────────────────────────────
-    await cl.Message(content="⏳ Preparing download files…").send()
-    dl_elements = []
-    for label, gen_fn, fname, mime in [
+    await cl.Message(content="⏳ Preparing download files (generating all formats in parallel)…").send()
+
+    formats = [
         ("DOCX",     generate_docx,     "project_report.docx",
          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         ("PDF",      generate_pdf,      "project_report.pdf",  "application/pdf"),
         ("JSON",     generate_json,     "project_report.json", "application/json"),
         ("Markdown", generate_markdown, "project_report.md",   "text/markdown"),
-    ]:
+    ]
+
+    async def _gen_file(label, gen_fn, fname, mime):
         try:
-            buf = await asyncio.to_thread(gen_fn, report)
+            buf  = await asyncio.to_thread(gen_fn, report)
             data = buf.read()
             if not data:
                 raise ValueError("generator returned empty bytes")
-            dl_elements.append(
-                cl.File(name=fname, content=data, mime=mime, display="inline")
-            )
+            return cl.File(name=fname, content=data, mime=mime, display="inline")
         except Exception as e:
             await cl.Message(content=f"⚠️ {label} generation failed: {e}").send()
+            return None
+
+    results   = await asyncio.gather(*[_gen_file(*f) for f in formats])
+    dl_elements = [r for r in results if r is not None]
+
 
     if dl_elements:
         await cl.Message(content="### 📥 Download Report", elements=dl_elements).send()
@@ -1574,6 +1585,20 @@ async def _handle_rag_upload(s: dict) -> None:
 
 from functools import wraps
 
+async def _clear_hitl_buttons(msg_id_key: str) -> None:
+    """Remove all buttons from a previously sent HITL card, keeping its text."""
+    try:
+        data = cl.user_session.get(msg_id_key)
+        if not data:
+            return
+        if isinstance(data, dict):
+            msg = cl.Message(id=data["id"], content=data.get("content", ""), actions=[])
+        else:  # legacy: only the id was stored
+            msg = cl.Message(id=data, content="", actions=[])
+        await msg.update()
+    except Exception:
+        pass
+
 def prevent_concurrent(func):
     @wraps(func)
     async def wrapper(action: cl.Action, *args, **kwargs):
@@ -1808,6 +1833,7 @@ async def on_run_task_agent(action: cl.Action):
 @cl.action_callback("hitl1_approve")
 @prevent_concurrent
 async def on_hitl1_approve(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
     s   = _state()
     pid = (s["selected_project"] or {}).get("id")
     s["approved_requirements"] = _to_dict(s["task_output"])
@@ -1864,6 +1890,7 @@ async def on_hitl1_approve(action: cl.Action):
 @cl.action_callback("hitl1_regen")
 @prevent_concurrent
 async def on_hitl1_regen(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
     s = _state()
     res = await cl.AskUserMessage(
         content=(
@@ -1905,6 +1932,7 @@ async def on_hitl1_regen(action: cl.Action):
 @cl.action_callback("hitl2_approve")
 @prevent_concurrent
 async def on_hitl2_approve(action: cl.Action):
+    await _clear_hitl_buttons("hitl2_msg_id")
     s = _state()
     s["approved_plan"]        = _to_dict(s["plan_output"])
     s["approved_feasibility"] = _to_dict(s["feasibility_output"])
@@ -1916,6 +1944,7 @@ async def on_hitl2_approve(action: cl.Action):
 @cl.action_callback("hitl2_regen_plan")
 @prevent_concurrent
 async def on_hitl2_regen_plan(action: cl.Action):
+    await _clear_hitl_buttons("hitl2_msg_id")
     s = _state()
     res = await cl.AskUserMessage(
         content=(
@@ -1974,6 +2003,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
 @cl.action_callback("hitl2_rerun_feas")
 @prevent_concurrent
 async def on_hitl2_rerun_feas(action: cl.Action):
+    await _clear_hitl_buttons("hitl2_msg_id")
     s = _state()
     res = await cl.AskUserMessage(
         content=(
@@ -2041,7 +2071,7 @@ async def on_run_estimation(action: cl.Action):
 
     await cl.Message(
         content="⏳ Running Estimation Agent — this may take 2–5 minutes on free models...",
-        actions=[cl.Action(name="stop_estimation", label="⏹ Stop", value="stop", description="Cancel after the current step")],
+        actions=[cl.Action(name="stop_estimation", payload={}, label="⏹ Stop", description="Cancel after the current step")],
     ).send()
     try:
         async with cl.Step(name="Mapping structure (Pass 1)", type="tool") as step1:
@@ -2092,6 +2122,7 @@ async def on_run_estimation(action: cl.Action):
 @cl.action_callback("hitl3_approve")
 @prevent_concurrent
 async def on_hitl3_approve(action: cl.Action):
+    await _clear_hitl_buttons("hitl3_msg_id")
     s = _state()
     s["approved_estimation"] = _to_dict(s["estimation_output"])
     _save(s)
@@ -2103,6 +2134,7 @@ async def on_hitl3_approve(action: cl.Action):
 @cl.action_callback("hitl3_regen")
 @prevent_concurrent
 async def on_hitl3_regen(action: cl.Action):
+    await _clear_hitl_buttons("hitl3_msg_id")
     s = _state()
     s["cancel_requested"] = False
     _save(s)
@@ -2130,7 +2162,7 @@ async def on_hitl3_regen(action: cl.Action):
 
     await cl.Message(
         content="⏳ Regenerating Estimation — this may take 2–5 minutes...",
-        actions=[cl.Action(name="stop_estimation", label="⏹ Stop", value="stop", description="Cancel after the current step")],
+        actions=[cl.Action(name="stop_estimation", payload={}, label="⏹ Stop", description="Cancel after the current step")],
     ).send()
     try:
         async with cl.Step(name="Mapping structure (Pass 1)", type="tool") as step1:
