@@ -1932,6 +1932,7 @@ async def on_hitl1_regen(action: cl.Action):
 @cl.action_callback("hitl2_approve")
 @prevent_concurrent
 async def on_hitl2_approve(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
     await _clear_hitl_buttons("hitl2_msg_id")
     s = _state()
     s["approved_plan"]        = _to_dict(s["plan_output"])
@@ -1944,6 +1945,7 @@ async def on_hitl2_approve(action: cl.Action):
 @cl.action_callback("hitl2_regen_plan")
 @prevent_concurrent
 async def on_hitl2_regen_plan(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
     await _clear_hitl_buttons("hitl2_msg_id")
     s = _state()
     res = await cl.AskUserMessage(
@@ -2003,6 +2005,7 @@ async def on_hitl2_regen_plan(action: cl.Action):
 @cl.action_callback("hitl2_rerun_feas")
 @prevent_concurrent
 async def on_hitl2_rerun_feas(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
     await _clear_hitl_buttons("hitl2_msg_id")
     s = _state()
     res = await cl.AskUserMessage(
@@ -2122,6 +2125,8 @@ async def on_run_estimation(action: cl.Action):
 @cl.action_callback("hitl3_approve")
 @prevent_concurrent
 async def on_hitl3_approve(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
+    await _clear_hitl_buttons("hitl2_msg_id")
     await _clear_hitl_buttons("hitl3_msg_id")
     s = _state()
     s["approved_estimation"] = _to_dict(s["estimation_output"])
@@ -2134,6 +2139,8 @@ async def on_hitl3_approve(action: cl.Action):
 @cl.action_callback("hitl3_regen")
 @prevent_concurrent
 async def on_hitl3_regen(action: cl.Action):
+    await _clear_hitl_buttons("hitl1_msg_id")
+    await _clear_hitl_buttons("hitl2_msg_id")
     await _clear_hitl_buttons("hitl3_msg_id")
     s = _state()
     s["cancel_requested"] = False
