@@ -90,6 +90,7 @@ Rules:
 - tech_stack categories are DYNAMIC — use whatever categories make sense for this project.
 - For each tech_stack category, add a matching "<category> language" key with the primary programming language (e.g., "backend language": "Python", "frontend language": "TypeScript"). If no language applies (e.g., a SaaS tool), use "N/A".
 - recommendation_reason keys MUST match the base tech_stack keys only (not the language keys).
+- USER REQUESTS IN FEEDBACK: If the user's feedback (in the section above) asks for extra details about the technologies — e.g. pricing/cost, comparisons with alternatives, security/compliance, licensing, performance, or ANY other question — you MUST address it by performing a web search for real, current facts and WEAVING that information directly into the relevant tech's "recommendation_reason" text. The recommendation_reason is the flexible place to answer whatever the user asked. Always label any pricing/estimates as approximate (e.g. "approx ~$X/mo") and cite the basis when possible. Do NOT invent a new top-level JSON field for it — keep the EXACT structure above.
 - reference_docs: Include real, valid documentation URLs relevant to the chosen stack.
 - excalidraw_diagram: Generate a proper node/edge architecture diagram for THIS project.
   - nodes: 5-10 BUSINESS-LEVEL components (not framework names). Each node needs: id (short slug), label (2-4 words), type (box/database/decision/circle), layer (0=leftmost/client, increasing towards right/external).

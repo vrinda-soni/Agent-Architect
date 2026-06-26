@@ -156,8 +156,14 @@ def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
 # -----------------------------------------------------------------
 # OpenRouter call
 # -----------------------------------------------------------------
-def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int = None, timeout: int = 45) -> str:
-    """Call OpenRouter with a specific model."""
+def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int = None, timeout: int = 45, web_search: bool = False) -> str:
+    """Call OpenRouter with a specific model.
+
+    When web_search=True, attach OpenRouter's server-side web search tool so the
+    model is grounded on live web results (real, up-to-date reference links).
+    OpenRouter runs the search itself and returns the final answer — no client
+    tool-call loop needed. Only used by agents that request it (e.g. planning).
+    """
     if not OPENROUTER_API_KEY:
         raise ValueError(
             "OpenRouter API key is not set. Please add OPENROUTER_API_KEY to your .env file."
@@ -175,6 +181,13 @@ def _call_openrouter(prompt: str, model: str, generation=None, max_tokens: int =
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    if web_search:
+        # OpenRouter-operated web search tool. Capped at 3 results to keep
+        # latency/cost low while still grounding the model on real links.
+        payload["tools"] = [{
+            "type": "openrouter:web_search",
+            "parameters": {"max_results": 3},
+        }]
 
     start = time.time()
     resp = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=timeout)
@@ -331,6 +344,7 @@ def _try_openrouter_parallel(
     batch_size: int = 3,
     parent=None,
     agent_name: str = "llm_call",
+    web_search: bool = False,
 ) -> str:
     """
     Try OpenRouter models in parallel batches of `batch_size`.
@@ -360,7 +374,7 @@ def _try_openrouter_parallel(
                     gen = None
             gens[m] = gen
             future_to_model[
-                executor.submit(_call_openrouter, prompt, m, gen, token_limit, or_timeout)
+                executor.submit(_call_openrouter, prompt, m, gen, token_limit, or_timeout, web_search)
             ] = m
             
         for future in as_completed(future_to_model):
@@ -492,7 +506,7 @@ def generate_with_fallback(
                 input=prompt,
                 metadata={"provider": "openrouter", "max_tokens": token_limit, "priority": "first"},
             )
-            result = _call_openrouter(prompt, _GPT_OSS_MODEL, gen, token_limit, or_timeout)
+            result = _call_openrouter(prompt, _GPT_OSS_MODEL, gen, token_limit, or_timeout, web_search=use_search)
             print(f"[LLM] OK  gpt-oss-120b succeeded (first) for '{agent_name}'")
             if trace is None:
                 flush()
@@ -515,7 +529,7 @@ def generate_with_fallback(
     try:
         result = _try_openrouter_parallel(
             prompt, fallback_list, token_limit, or_timeout,
-            parent=active_trace, agent_name=agent_name,
+            parent=active_trace, agent_name=agent_name, web_search=use_search,
         )
         if trace is None:
             flush()
