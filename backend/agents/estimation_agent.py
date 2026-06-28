@@ -445,3 +445,69 @@ def run_estimation_agent(
     """Convenience wrapper: runs both passes sequentially."""
     p1 = run_estimation_pass1(requirements, plan, feasibility, feedback, rag_context, trace)
     return run_estimation_pass2(p1, include_mvp, trace)
+
+
+_EXTRACT_CONTEXT_PROMPT_PREFIX = """You are a Project Analyst. Extract a structured project summary from the reference documents below.
+Return ONLY valid JSON with exactly this structure (no markdown, no prose):
+{
+  "requirements": ["<requirement>", ...],
+  "business_goals": ["<goal>", ...],
+  "constraints": ["<constraint>", ...],
+  "pain_points": ["<pain point>", ...],
+  "architecture_type": "<Monolithic | Microservices | Serverless | Event-driven | etc.>",
+  "tech_stack": {"frontend": "...", "backend": "...", "database": "...", "ai_ml": "...", "cloud": "..."},
+  "architecture_summary": {
+    "overview": "<1-2 sentence overview>",
+    "workflow": "<brief workflow description>",
+    "data_flow": "<brief data flow description>"
+  },
+  "complexity_level": "<Low | Medium | High>",
+  "feasibility_summary": "<one sentence feasibility assessment>",
+  "technical_risks": []
+}
+
+DOCUMENTS:
+"""
+
+
+def extract_context_from_docs(doc_context: str, trace=None) -> tuple:
+    """
+    Single LLM call that reads raw doc text and returns
+    (requirements, plan, feasibility) dicts ready for run_estimation_pass1.
+    """
+    if not doc_context or not doc_context.strip():
+        raise ValueError("No document content found — upload reference docs first.")
+
+    span = create_span(trace, "extract_context_from_docs", input={"doc_len": len(doc_context)})
+    prompt = _EXTRACT_CONTEXT_PROMPT_PREFIX + doc_context
+    raw = generate_with_fallback(prompt, use_search=False, trace=span or trace, agent_name="estimation_from_docs")
+    if span:
+        span.end(output={"raw_len": len(raw)})
+
+    try:
+        parsed = extract_json(raw)
+    except Exception as e:
+        raise ValueError(f"Could not parse project summary from documents: {e}\nFirst 300 chars: {raw[:300]}")
+
+    requirements = {
+        "requirements":   parsed.get("requirements") or [],
+        "business_goals": parsed.get("business_goals") or [],
+        "constraints":    parsed.get("constraints") or [],
+        "pain_points":    parsed.get("pain_points") or [],
+    }
+    plan = {
+        "architecture_type":    parsed.get("architecture_type") or "Not specified",
+        "tech_stack":           parsed.get("tech_stack") or {},
+        "recommendation_reason": {},
+        "architecture_summary": parsed.get("architecture_summary") or {
+            "overview": "Derived from reference documents", "workflow": "", "data_flow": "",
+        },
+    }
+    feasibility = {
+        "complexity_level":        parsed.get("complexity_level") or "Medium",
+        "feasibility_summary":     parsed.get("feasibility_summary") or "Based on provided documents.",
+        "technical_risks":         parsed.get("technical_risks") or [],
+        "architecture_confidence": "Medium",
+        "feasibility_confidence":  "Medium",
+    }
+    return requirements, plan, feasibility

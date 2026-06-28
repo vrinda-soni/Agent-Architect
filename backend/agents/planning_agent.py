@@ -111,6 +111,33 @@ Respond with ONLY the JSON object, nothing else.
 """
 
 # -----------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------
+
+def _coerce_plan(parsed: dict) -> dict:
+    """Normalize planning output fields that fallback LLMs sometimes return in wrong types."""
+    # architecture_summary: string → dict
+    summary = parsed.get("architecture_summary")
+    if isinstance(summary, str):
+        parsed["architecture_summary"] = {"overview": summary, "workflow": "", "data_flow": ""}
+
+    # reference_docs: list of strings → list of {title, url} dicts
+    refs = parsed.get("reference_docs")
+    if isinstance(refs, list):
+        coerced = []
+        for item in refs:
+            if isinstance(item, dict):
+                coerced.append({"title": item.get("title", ""), "url": item.get("url", "")})
+            elif isinstance(item, str):
+                coerced.append({"title": item, "url": ""})
+            else:
+                coerced.append({"title": str(item), "url": ""})
+        parsed["reference_docs"] = coerced
+
+    return parsed
+
+
+# -----------------------------------------------------------------
 # Planning Agent Function
 # -----------------------------------------------------------------
 def run_planning_agent(requirements: dict, rag_context: str = "", feedback: str = "", trace=None) -> PlanningAgentOutput:
@@ -136,6 +163,9 @@ def run_planning_agent(requirements: dict, rag_context: str = "", feedback: str 
 
     # Parse the JSON response with robust extraction
     parsed = extract_json(raw_text)
+
+    # Normalize fields that fallback LLMs sometimes return in wrong shape
+    parsed = _coerce_plan(parsed)
 
     # Validate against Pydantic schema
     result = PlanningAgentOutput(**parsed)

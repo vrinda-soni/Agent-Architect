@@ -9,9 +9,9 @@ An end-to-end agentic application that turns a project transcript (meeting notes
 1. **Upload a transcript** — paste or upload any document describing your project idea
 2. **Task Agent** — extracts and structures requirements from the transcript
 3. **Planning Agent** — designs the architecture (tech stack, components, data flow, diagrams)
-4. **Feasibility Agent** — analyses risks, complexity, effort, and go/no-go recommendation
-5. **Estimation Agent** — produces a full Work Breakdown Structure (WBS) broken down by Functionality → Module → Feature → Task → Sub Task, with engineer roles and interface types
-6. **Report Agent** — generates a professional POC report downloadable as PDF, DOCX, Markdown, or JSON
+4. **Feasibility Agent** — analyses risks, complexity, and go/no-go confidence
+5. **Estimation Agent** — produces a full Work Breakdown Structure (WBS) broken down by Functionality → Module → Task → Sub-task, with stack involvement and effort hours
+6. **Report Agent** — generates a professional 11-section POC report downloadable as PDF, DOCX, Markdown, or JSON
 7. **Q&A** — ask questions about the project using RAG over all uploaded documents and agent outputs
 
 At every stage you can approve the output, regenerate with feedback, or edit before moving on (Human-in-the-Loop).
@@ -23,16 +23,16 @@ At every stage you can approve the output, regenerate with feedback, or edit bef
 | Layer | Technology |
 |---|---|
 | Frontend / Chat UI | Chainlit (port 8501) |
-| Backend API | FastAPI + Uvicorn (port 8000) |
+| Agent Orchestration | Direct agent calls via `asyncio.to_thread` |
 | Primary LLM | Google Gemini 2.0 Flash |
-| LLM Fallback | OpenRouter (7 free models, parallel batching) |
-| Embeddings | Gemini Embedding 001 (768-dim) |
+| LLM Fallback | Mistral → OpenRouter (7 free models, parallel batching) |
+| Embeddings | Gemini Embedding 001 (768-dim) / BGE-M3 fallback |
 | Database | Supabase (PostgreSQL + pgvector) |
 | Vector Search | pgvector with HNSW index |
-| Semantic Cache | Supabase `qa_cache` table + pgvector similarity |
+| Semantic Cache | Supabase `qa_cache` + pgvector similarity (threshold 0.92) |
 | Report Generation | fpdf2 (PDF), python-docx (DOCX) |
 | WBS Export | openpyxl (Excel) |
-| Diagrams | Excalidraw |
+| Diagrams | Excalidraw JSON → PIL PNG render |
 | Observability | Langfuse |
 | Auth | Supabase Auth |
 
@@ -43,16 +43,17 @@ At every stage you can approve the output, regenerate with feedback, or edit bef
 ```
 Agent-Architect/
 ├── frontend/
-│   └── chainlit_app.py          # Main Chainlit UI — all chat flows and callbacks
+│   └── chainlit_app.py          # Chainlit UI — all chat flows, buttons, HITL screens
 ├── backend/
 │   ├── agents/
 │   │   ├── task_agent.py        # Requirements extraction
-│   │   ├── planning_agent.py    # Architecture planning
-│   │   ├── feasibility_agent.py # Feasibility analysis
-│   │   ├── estimation_agent.py  # Work breakdown structure
-│   │   ├── report_agent.py      # Report generation
+│   │   ├── planning_agent.py    # Architecture planning + diagram generation
+│   │   ├── feasibility_agent.py # Risk analysis + complexity scoring
+│   │   ├── estimation_agent.py  # Two-pass WBS generation (parallel)
+│   │   ├── report_agent.py      # 11-section consulting report
 │   │   └── json_utils.py        # Robust JSON extraction (handles truncated LLM output)
 │   ├── schemas/
+│   │   ├── state_schema.py      # LangGraph AgentState TypedDict
 │   │   ├── task_schema.py
 │   │   ├── plan_schema.py
 │   │   ├── feasibility_schema.py
@@ -63,19 +64,33 @@ Agent-Architect/
 │   │   ├── retrival.py          # Vector similarity search
 │   │   └── cache.py             # Semantic Q&A cache
 │   ├── api/
-│   │   └── main.py              # FastAPI routes
-│   ├── llm_client.py            # Gemini primary + OpenRouter fallback chain
+│   │   ├── main.py              # Optional FastAPI REST endpoints
+│   │   └── client.py            # HTTP client for the FastAPI layer
+│   ├── workflow.py              # LangGraph graph — nodes, HITL routing, checkpointer
+│   ├── llm_client.py            # Gemini → Mistral → OpenRouter fallback chain
+│   ├── langfuse_client.py       # Langfuse tracing helpers
+│   ├── supabase.py              # Supabase client + DB helpers
 │   ├── report_generator.py      # PDF / DOCX / Markdown / JSON export
-│   ├── supabase.py              # Supabase client
-│   ├── langfuse_client.py       # Langfuse tracing
-│   └── hitl.py                  # Human-in-the-Loop helpers
+│   ├── excalidraw_utils.py      # Excalidraw JSON → PIL PNG renderer
+│   └── mcp_excalidraw.py        # MCP server for diagram generation
+├── database/
+│   ├── supabase_rag_migration.sql    # document_chunks table + pgvector + RPC
+│   ├── pipeline_runs_migration.sql   # pipeline state persistence table
+│   └── qa_cache_migration.sql        # semantic Q&A cache table + RPC
+├── tests/
+│   ├── test_feasibility.py
+│   ├── test_plan.py
+│   └── test_planning.py
+├── scripts/
+│   └── add_decorator.py
 ├── .chainlit/
 │   └── config.toml              # Chainlit settings
-├── supabase_rag_migration.sql   # RAG tables (document_chunks)
-├── pipeline_runs_migration.sql  # Pipeline persistence table
-├── qa_cache_migration.sql       # Semantic cache table + match function
-└── run.ps1                      # One-command startup script
+├── chainlit.md                  # Chainlit welcome / login screen
+├── requirements.txt
+└── PROJECT_STRUCTURE.md         # Full file-by-file description of the codebase
 ```
+
+> See **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)** for a detailed description of every file and folder.
 
 ---
 
@@ -99,8 +114,6 @@ pip install -r requirements.txt
 
 ### 2. Create `.env` file
 
-Create a `.env` file in the project root:
-
 ```env
 GEMINI_API_KEY=your_gemini_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
@@ -119,22 +132,18 @@ HF_TOKEN=your_huggingface_token
 In your Supabase dashboard → SQL Editor, run these three files **in order**:
 
 ```
-1. supabase_rag_migration.sql      ← document storage + vector search
-2. pipeline_runs_migration.sql     ← pipeline state persistence
-3. qa_cache_migration.sql          ← semantic Q&A cache
+1. database/supabase_rag_migration.sql      ← document storage + vector search
+2. database/pipeline_runs_migration.sql     ← pipeline state persistence
+3. database/qa_cache_migration.sql          ← semantic Q&A cache
 ```
 
 ### 4. Start the app
 
 ```powershell
-.\run.ps1
+chainlit run frontend/chainlit_app.py --port 8501
 ```
 
-This opens two terminal windows:
-- **FastAPI** → http://localhost:8000
-- **Chainlit UI** → http://localhost:8501
-
-Open http://localhost:8501 in your browser.
+Open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ---
 
@@ -148,26 +157,34 @@ Open http://localhost:8501 in your browser.
    - Each stage shows a Human-in-the-Loop confirmation before moving on
 5. **Download the WBS** as Excel from the Estimation step
 6. **Download the report** as PDF / DOCX / Markdown / JSON from the Report step
-7. **Ask questions** about the project in the Q&A tab — answers are RAG-powered from all your documents
+7. **Ask questions** about the project in Q&A mode — answers are RAG-powered from all your documents
 
 ---
 
 ## Key Features
 
+### Agent orchestration
+Each agent is called directly from `chainlit_app.py` via `asyncio.to_thread`, which runs the synchronous agent function off the async event loop without blocking the UI. Chainlit session state (`s`) holds all pipeline data between steps, and Supabase persists it across sessions. Human-in-the-Loop (HITL) pauses are handled natively by Chainlit action callbacks — the UI shows each agent's output, waits for the user to approve or regenerate, then calls the next agent directly.
+
+> `backend/workflow.py` contains a full LangGraph `StateGraph` implementation of the same pipeline (with `interrupt()` HITL nodes and `MemorySaver` checkpointing) and is kept as a reference. It is not the active code path — LangGraph 1.2.4's interrupt/resume mechanism was incompatible with Chainlit's `asyncio.to_thread` execution model.
+
 ### Multi-model LLM fallback
-Gemini is tried first. On quota/rate-limit, the app automatically falls back through 7 OpenRouter free models, tried **3 at a time in parallel** — first success wins. This keeps agents fast even when Gemini is exhausted.
+Gemini is tried first (Q&A/streaming). For heavy agents, Mistral is tried next (higher output token limits). On failure, the app falls back through 7 OpenRouter free models tried **3 at a time in parallel** — first success wins. This keeps agents fast even when Gemini is rate-limited.
+
+### Two-pass estimation
+Estimation runs in two focused LLM calls: Pass 1 identifies functionalities and modules (small, fast output); Pass 2 decomposes each functionality into tasks in parallel (one LLM call per functionality via `ThreadPoolExecutor`). This avoids single-call truncation on large projects.
 
 ### Semantic Q&A cache
 Repeated or similar questions are answered instantly from a pgvector cache (similarity threshold 0.92) — no LLM call needed.
 
 ### RAG over project documents
-Upload reference docs (PDF, DOCX, TXT, or any format) alongside your transcript. All documents are chunked, embedded, and stored in Supabase. The Q&A agent retrieves the most relevant chunks before answering.
+Upload reference docs (PDF, DOCX, TXT) alongside your transcript. All documents are chunked, embedded, and stored in Supabase. The Q&A agent retrieves the most relevant chunks before answering.
 
 ### Pipeline persistence
 Pipeline state is saved to Supabase after every step. Returning to a project resumes exactly where you left off.
 
 ### Robust JSON recovery
-Agent outputs (especially the large WBS) are often truncated by free LLMs. The app uses a multi-stage repair strategy — including item-by-item extraction — so partial outputs are never lost.
+Agent outputs (especially the large WBS) are often truncated by free LLMs. A multi-stage repair strategy — including item-by-item extraction — ensures partial outputs are never silently lost.
 
 ---
 
@@ -179,7 +196,7 @@ Agent outputs (especially the large WBS) are often truncated by free LLMs. The a
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key (fallback LLMs) |
 | `SUPABASE_URL` | Yes | Your Supabase project URL |
 | `SUPABASE_KEY` | Yes | Supabase anon/service key |
-| `LANGFUSE_PUBLIC_KEY` | No | Langfuse observability (optional) |
-| `LANGFUSE_SECRET_KEY` | No | Langfuse observability (optional) |
-| `MISTRAL_API_KEY` | No | Mistral direct API (optional fallback for estimation) |
-| `HF_TOKEN` | No | HuggingFace token (fallback embeddings) |
+| `LANGFUSE_PUBLIC_KEY` | No | Langfuse observability |
+| `LANGFUSE_SECRET_KEY` | No | Langfuse observability |
+| `MISTRAL_API_KEY` | No | Mistral direct API (estimation fallback) |
+| `HF_TOKEN` | No | HuggingFace token (BGE-M3 embedding fallback) |

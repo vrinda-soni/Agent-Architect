@@ -87,6 +87,40 @@ def retrieve_context(project_id: str, query_text: str, top_k: int = 5) -> list[d
         return []
 
 
+def get_all_project_doc_text(project_id: str) -> str:
+    """
+    Fetch ALL stored chunks for a project (no vector filtering) and return
+    them concatenated as plain text — gives the LLM the full document content,
+    like how the transcript is passed directly rather than retrieved by similarity.
+    """
+    if not project_id:
+        return ""
+    sb = _supabase()
+    if not sb:
+        return ""
+    try:
+        resp = sb.table("document_chunks") \
+            .select("document_name, chunk_index, chunk_text") \
+            .eq("project_id", project_id) \
+            .order("document_name") \
+            .order("chunk_index") \
+            .execute()
+        chunks = resp.data or []
+        if not chunks:
+            return ""
+        lines = []
+        current_doc = None
+        for c in chunks:
+            if c.get("document_name") != current_doc:
+                current_doc = c.get("document_name", "Document")
+                lines.append(f"\n=== {current_doc} ===\n")
+            lines.append(c.get("chunk_text", ""))
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[RAG] get_all_project_doc_text error: {e}")
+        return ""
+
+
 def format_context_for_prompt(chunks: list[dict]) -> str:
     if not chunks:
         return ""

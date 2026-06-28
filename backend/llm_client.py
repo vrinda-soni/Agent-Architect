@@ -327,11 +327,12 @@ def _call_gemini(prompt: str, use_search: bool = False, generation=None, max_tok
 # Large-output agents need more time; others fail fast so next model can be tried
 # -----------------------------------------------------------------
 _AGENT_OPENROUTER_TIMEOUT: dict[str, int] = {
-    "estimation_agent":  600,
-    "report_agent":      600,
-    "task_agent":        300,
-    "planning_agent":    300,
-    "feasibility_agent": 300,
+    "estimation_agent":      600,
+    "report_agent":          600,
+    "task_agent":            300,
+    "planning_agent":        300,
+    "feasibility_agent":     300,
+    "estimation_from_docs":  300,
 }
 _DEFAULT_OPENROUTER_TIMEOUT = 120
 
@@ -382,7 +383,13 @@ def _try_openrouter_parallel(
             try:
                 result = future.result()
                 print(f"[LLM] OK  {model} succeeded (parallel)")
-                # Return immediately without waiting for other slow/failing models!
+                # Close all other pending generations before exiting
+                for other_m, other_gen in gens.items():
+                    if other_m != model and other_gen:
+                        try:
+                            other_gen.end(level="DEFAULT", status_message="skipped — another model succeeded first")
+                        except Exception:
+                            pass
                 executor.shutdown(wait=False, cancel_futures=True)
                 return result
             except Exception as e:

@@ -84,6 +84,46 @@ Respond with ONLY the JSON object, nothing else.
 """
 
 # -----------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------
+
+def _coerce_risks(risks: list) -> list:
+    """Normalize technical_risks entries that are plain strings into the
+    {risk, impact, mitigation} dict shape that TechnicalRisk expects.
+    Some fallback LLMs ignore the schema and return strings like
+    'Budget overrun: description...' — this recovers them gracefully."""
+    coerced = []
+    for item in risks:
+        if isinstance(item, dict):
+            coerced.append({
+                "risk":       item.get("risk", str(item)),
+                "impact":     item.get("impact", "Not specified"),
+                "mitigation": item.get("mitigation", "Not specified"),
+            })
+        elif isinstance(item, str):
+            if ": " in item:
+                name, rest = item.split(": ", 1)
+                coerced.append({
+                    "risk":       name.strip(),
+                    "impact":     rest.strip(),
+                    "mitigation": "Review and address during project planning.",
+                })
+            else:
+                coerced.append({
+                    "risk":       item.strip(),
+                    "impact":     "See risk description.",
+                    "mitigation": "Review and address during project planning.",
+                })
+        else:
+            coerced.append({
+                "risk":       str(item),
+                "impact":     "Not specified",
+                "mitigation": "Not specified",
+            })
+    return coerced
+
+
+# -----------------------------------------------------------------
 # Feasibility Agent Function
 # -----------------------------------------------------------------
 def run_feasibility_agent(requirements: dict, plan: dict, feedback: str = "", trace=None) -> FeasibilityAgentOutput:
@@ -108,6 +148,11 @@ def run_feasibility_agent(requirements: dict, plan: dict, feedback: str = "", tr
 
     # Parse the JSON response with robust extraction
     parsed = extract_json(raw_text)
+
+    # Fallback LLMs sometimes return technical_risks as plain strings instead of
+    # {"risk", "impact", "mitigation"} dicts. Coerce them so Pydantic doesn't raise.
+    if "technical_risks" in parsed and isinstance(parsed["technical_risks"], list):
+        parsed["technical_risks"] = _coerce_risks(parsed["technical_risks"])
 
     # Validate against Pydantic schema
     result = FeasibilityAgentOutput(**parsed)

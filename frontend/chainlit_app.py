@@ -26,9 +26,9 @@ import backend.supabase as db
 from backend.agents.task_agent import run_task_agent
 from backend.agents.planning_agent import run_planning_agent
 from backend.agents.feasibility_agent import run_feasibility_agent
-from backend.agents.estimation_agent import run_estimation_agent, run_estimation_pass1, run_estimation_pass2
+from backend.agents.estimation_agent import run_estimation_pass1, run_estimation_pass2, extract_context_from_docs
 from backend.agents.report_agent import run_report_agent
-from backend.rag.retrival import retrieve_context as _retrieve_context, format_context_for_prompt as _format_context
+from backend.rag.retrival import retrieve_context as _retrieve_context, format_context_for_prompt as _format_context, get_all_project_doc_text
 from backend.report_generator import generate_docx, generate_pdf, generate_json, generate_markdown
 from backend.rag.ingestion import ingest_document, list_project_documents, extract_text
 from backend.rag.retrival import retrieve_context, format_context_for_prompt
@@ -96,7 +96,7 @@ def _bg(coro) -> None:
     """Schedule a coroutine to run AFTER the current callback returns.
     This prevents Chainlit from tracking it as part of the current action,
     which would keep buttons greyed until the task finishes."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.call_soon(lambda: asyncio.ensure_future(coro))
 
 
@@ -724,6 +724,7 @@ async def _show_transcript_step(project: dict, s: dict) -> None:
                 ),
                 actions=[
                     cl.Action(name="upload_ref_docs", payload={}, label="➕ Add More Reference Docs"),
+                    cl.Action(name="run_estimation_from_docs", payload={}, label="⚡ Run Estimation from Docs"),
                     *delete_actions,
                 ],
             ).send()
@@ -982,33 +983,6 @@ async def _show_estimation_result(s: dict) -> None:
         summary.append(f"\n**Tech Disciplines:** {' | '.join(stacks)}")
     await cl.Message(content="\n".join(summary)).send()
 
-    # ── Grouped preview by functionality ──────────────────────────────────────
-    df = _build_estimation_df(est)
-    preview_lines = ["```"]
-    current_func = None
-    count = 0
-    for _, row in df.iterrows():
-        if count >= 40:
-            break
-        func = row.get("Functionality Type", "")
-        if func != current_func:
-            preview_lines.append(f"\n── {func} ──")
-            current_func = func
-        # build concise row: No | Module | stack marks | Interface Type
-        marks = "  ".join(
-            f"{col}:✓" if row.get(col) == "✓" else f"{col}:·"
-            for col in stacks
-        )
-        hours = str(row.get('Estimated Hours', 0)) + 'h'
-        comp = str(row.get('Complexity', ''))
-        task_label = str(row.get('Task', ''))
-        preview_lines.append(f"  {str(row.get('No','')):8}  {task_label[:45]:45} {hours:>4} {comp[:4]:4}  {marks}  [{row.get('Interface Type','')}]")
-        count += 1
-    preview_lines.append("```")
-    await cl.Message(content="\n".join(preview_lines)).send()
-    if total > 40:
-        await cl.Message(content=f"*Showing first 40 of {total} tasks — full table in the Excel download.*").send()
-
     # ── Assumptions ───────────────────────────────────────────────────────────
     if est.assumptions:
         lines = ["**Assumptions:**"]
@@ -1016,6 +990,7 @@ async def _show_estimation_result(s: dict) -> None:
         await cl.Message(content="\n".join(lines)).send()
 
     # ── Excel download with formatting ────────────────────────────────────────
+    df = _build_estimation_df(est)
     try:
         from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
@@ -1577,6 +1552,13 @@ async def _handle_rag_upload(s: dict) -> None:
         except Exception as e:
             await cl.Message(content=f"❌ {f.name}: {e}").send()
 
+    await cl.Message(
+        content="📄 Docs indexed! You can now run estimation directly from these documents:",
+        actions=[
+            cl.Action(name="run_estimation_from_docs", payload={}, label="⚡ Run Estimation from Docs"),
+        ],
+    ).send()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Action callbacks
@@ -1802,21 +1784,22 @@ async def on_run_task_agent(action: cl.Action):
         await cl.Message(content="❌ No transcript found. Please upload one first.").send()
         return
 
+    pid = (s["selected_project"] or {}).get("id", "")
+    _start_trace(s)
+
     await cl.Message(content="⏳ Analyzing transcript — extracting requirements, pain points & constraints...").send()
-    trace = _start_trace(s)
     async with cl.Step(name="Task Agent", type="tool") as step:
-        step.input = "Analyzing transcript with Gemini AI..."
+        step.input = f"Transcript length: {len(transcript)} chars"
         try:
-            result = await asyncio.to_thread(partial(run_task_agent, transcript, trace=trace))
+            result = await asyncio.to_thread(
+                run_task_agent, transcript, "", _trace(s)
+            )
             s["task_output"] = result
             s["approved_requirements"] = None
             _reset_pipeline(s)
             _save(s)
             _db_save(s)
-            _bg(_ingest_to_rag(
-                (s["selected_project"] or {}).get("id", ""),
-                _task_output_to_text(result), "task_agent_output.txt"
-            ))
+            _bg(_ingest_to_rag(pid, _task_output_to_text(result), "task_agent_output.txt"))
             step.output = (
                 f"Extracted {len(result.requirements or [])} requirements, "
                 f"{len(result.pain_points or [])} pain points, "
@@ -1842,43 +1825,25 @@ async def on_hitl1_approve(action: cl.Action):
     _db_save(s)
 
     await cl.Message(content="✅ Requirements approved! Auto-running Planning & Feasibility agents…").send()
-    await cl.Message(content="⏳ Running Planning Agent — designing architecture & tech stack...").send()
 
-    trace = _trace(s)
-    # ── Planning ──────────────────────────────────────────────────────────────
-    plan_result = None
-    async with cl.Step(name="Planning Agent", type="tool") as step:
-        step.input = "Generating technical architecture..."
+    async with cl.Step(name="Planning & Feasibility", type="tool") as step:
+        step.input = "Running planning + feasibility agents..."
         try:
-            rag_ctx = _build_rag_context(pid, s["approved_requirements"])
-            plan_result = await asyncio.to_thread(
-                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx, trace=trace)
-            )
-            s["plan_output"] = plan_result
+            rag_ctx      = _build_rag_context(pid, s["approved_requirements"])
+            plan_result  = await asyncio.to_thread(run_planning_agent,    s["approved_requirements"], rag_ctx, "", _trace(s))
+            feas_result  = await asyncio.to_thread(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump(), "", _trace(s))
+
+            s["plan_output"]        = plan_result
+            s["feasibility_output"] = feas_result
             _save(s)
             _db_save(s)
             _bg(_ingest_to_rag(pid, _plan_output_to_text(plan_result), "planning_agent_output.txt"))
-            step.output = f"Architecture: {plan_result.architecture_type}"
+            _bg(_ingest_to_rag(pid, _feasibility_output_to_text(feas_result), "feasibility_agent_output.txt"))
+            step.output = f"Architecture: {plan_result.architecture_type} | Complexity: {feas_result.complexity_level}"
         except Exception as e:
             step.output = f"Failed: {e}"
-            await cl.Message(content=f"❌ Planning Agent failed: {e}").send()
-
-    # ── Feasibility ───────────────────────────────────────────────────────────
-    if plan_result:
-        async with cl.Step(name="Feasibility Agent", type="tool") as step:
-            step.input = "Assessing technical feasibility..."
-            try:
-                feas = await asyncio.to_thread(
-                    partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump(), trace=trace)
-                )
-                s["feasibility_output"] = feas
-                _save(s)
-                _db_save(s)
-                _bg(_ingest_to_rag(pid, _feasibility_output_to_text(feas), "feasibility_agent_output.txt"))
-                step.output = f"Complexity: {feas.complexity_level} | Confidence: {getattr(feas,'feasibility_confidence','—')}"
-            except Exception as e:
-                step.output = f"Failed: {e}"
-                await cl.Message(content=f"❌ Feasibility Agent failed: {e}").send()
+            await cl.Message(content=f"❌ Planning/Feasibility failed: {e}").send()
+            return
 
     if s["plan_output"]:
         await _show_planning_result(s)
@@ -1901,23 +1866,19 @@ async def on_hitl1_regen(action: cl.Action):
         ),
         timeout=300,
     ).send()
-    feedback = res["output"].strip() if res else ""
+    feedback   = res["output"].strip() if res else ""
+    pid        = (s["selected_project"] or {}).get("id", "")
 
     await cl.Message(content="⏳ Regenerating requirements extraction...").send()
     async with cl.Step(name="Task Agent (Regenerate)", type="tool") as step:
         step.input = f"Feedback: {feedback or 'none'}"
         try:
-            result = await asyncio.to_thread(
-                partial(run_task_agent, s["current_transcript"], feedback=feedback, trace=_trace(s))
-            )
+            result = await asyncio.to_thread(run_task_agent, s["current_transcript"], feedback, _trace(s))
             s["task_output"] = result
             s["approved_requirements"] = None
             _reset_pipeline(s)
             _save(s)
-            _bg(_ingest_to_rag(
-                (s["selected_project"] or {}).get("id", ""),
-                _task_output_to_text(result), "task_agent_output.txt"
-            ))
+            _bg(_ingest_to_rag(pid, _task_output_to_text(result), "task_agent_output.txt"))
             step.output = f"Extracted {len(result.requirements or [])} requirements"
         except Exception as e:
             step.output = f"Failed: {e}"
@@ -1934,12 +1895,47 @@ async def on_hitl1_regen(action: cl.Action):
 async def on_hitl2_approve(action: cl.Action):
     await _clear_hitl_buttons("hitl1_msg_id")
     await _clear_hitl_buttons("hitl2_msg_id")
-    s = _state()
+    s   = _state()
+    pid = (s["selected_project"] or {}).get("id")
     s["approved_plan"]        = _to_dict(s["plan_output"])
     s["approved_feasibility"] = _to_dict(s["feasibility_output"])
     _save(s)
-    await cl.Message(content="✅ Plan & Feasibility approved! Ready for Estimation Agent.").send()
-    await _show_estimation_step(s)
+    _db_save(s)
+
+    await cl.Message(content="✅ Plan & Feasibility approved! Running Estimation Agent — this may take 2–5 minutes…").send()
+
+    inc_mvp     = s.get("include_mvp", False)
+    rag_context = ""
+    if pid:
+        try:
+            chunks = await asyncio.to_thread(partial(_retrieve_context, pid, "effort estimation work breakdown structure", 5))
+            rag_context = _format_context(chunks)
+        except Exception:
+            pass
+
+    async with cl.Step(name="Estimation Agent (Pass 1 + Pass 2)", type="tool") as step:
+        step.input = "Running estimation agents (pass 1 + pass 2)..."
+        try:
+            trace   = _trace(s)
+            ap      = _to_dict(s["approved_plan"])
+            af      = _to_dict(s["approved_feasibility"])
+            ar      = s["approved_requirements"]
+            p1      = await asyncio.to_thread(run_estimation_pass1, ar, ap, af, "", rag_context, trace)
+            result  = await asyncio.to_thread(run_estimation_pass2, p1, inc_mvp, trace)
+            s["estimation_output"]   = result
+            s["approved_estimation"] = None
+            s["report_output"]       = None
+            _save(s)
+            _db_save(s)
+            _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
+            step.output = f"Generated {len(_get_all_tasks(result))} work items"
+        except Exception as e:
+            step.output = f"Failed: {e}"
+            await cl.Message(content=f"❌ Estimation Agent failed: {e}").send()
+            return
+
+    await _show_estimation_result(s)
+    await _show_hitl3(s)
 
 
 @cl.action_callback("hitl2_regen_plan")
@@ -1957,47 +1953,33 @@ async def on_hitl2_regen_plan(action: cl.Action):
         ),
         timeout=300,
     ).send()
-    feedback = res["output"].strip() if res else ""
-    pid      = (s["selected_project"] or {}).get("id")
+    feedback   = res["output"].strip() if res else ""
+    pid        = (s["selected_project"] or {}).get("id")
 
-    plan_result = None
-    await cl.Message(content="⏳ Regenerating architecture plan...").send()
-    async with cl.Step(name="Planning Agent (Regenerate)", type="tool") as step:
+    await cl.Message(content="⏳ Regenerating architecture plan + feasibility...").send()
+    async with cl.Step(name="Planning + Feasibility (Regenerate)", type="tool") as step:
         step.input = f"Feedback: {feedback or 'none'}"
         try:
             rag_ctx = _build_rag_context(pid, s["approved_requirements"])
-            plan_result = await asyncio.to_thread(
-                partial(run_planning_agent, s["approved_requirements"], rag_context=rag_ctx, feedback=feedback, trace=_trace(s))
-            )
-            s["plan_output"] = plan_result
-            s["feasibility_output"] = None
+            # Resume graph: hitl_2_node → planning_agent_node → feasibility_agent_node → pause at hitl_2
+            plan_result = await asyncio.to_thread(run_planning_agent,    s["approved_requirements"], rag_ctx, feedback, _trace(s))
+            feas_result = await asyncio.to_thread(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump(), "", _trace(s))
+
+            s["plan_output"]        = plan_result
+            s["feasibility_output"] = feas_result
             s["approved_plan"] = s["approved_feasibility"] = None
             s["estimation_output"] = s["approved_estimation"] = s["report_output"] = None
             _save(s)
+            _db_save(s)
             _bg(_ingest_to_rag(pid, _plan_output_to_text(plan_result), "planning_agent_output.txt"))
-            step.output = f"Architecture: {plan_result.architecture_type}"
+            _bg(_ingest_to_rag(pid, _feasibility_output_to_text(feas_result), "feasibility_agent_output.txt"))
+            step.output = f"Architecture: {plan_result.architecture_type} | Complexity: {feas_result.complexity_level}"
         except Exception as e:
             step.output = f"Failed: {e}"
             await cl.Message(content=f"❌ Plan regeneration failed: {e}").send()
             return
 
     await _show_planning_result(s)
-
-    async with cl.Step(name="Feasibility Agent", type="tool") as step:
-        step.input = "Re-running feasibility on updated plan..."
-        try:
-            feas = await asyncio.to_thread(
-                partial(run_feasibility_agent, s["approved_requirements"], plan_result.model_dump(), trace=_trace(s))
-            )
-            s["feasibility_output"] = feas
-            _save(s)
-            _bg(_ingest_to_rag(pid, _feasibility_output_to_text(feas), "feasibility_agent_output.txt"))
-            step.output = f"Complexity: {feas.complexity_level}"
-        except Exception as e:
-            step.output = f"Failed: {e}"
-            await cl.Message(content=f"❌ Feasibility failed: {e}").send()
-            return
-
     await _show_feasibility_result(s)
     await _show_hitl2(s)
 
@@ -2017,23 +1999,21 @@ async def on_hitl2_rerun_feas(action: cl.Action):
         ),
         timeout=300,
     ).send()
-    feedback = res["output"].strip() if res else ""
+    feedback   = res["output"].strip() if res else ""
+    pid        = (s["selected_project"] or {}).get("id", "")
 
     await cl.Message(content="⏳ Re-running feasibility assessment...").send()
     async with cl.Step(name="Feasibility Agent (Re-run)", type="tool") as step:
         step.input = f"Feedback: {feedback or 'none'}"
         try:
             result = await asyncio.to_thread(
-                partial(run_feasibility_agent, s["approved_requirements"],
-                        _to_dict(s["plan_output"]), feedback=feedback, trace=_trace(s))
+                run_feasibility_agent, s["approved_requirements"], _to_dict(s["plan_output"]), feedback, _trace(s)
             )
-            s["feasibility_output"] = result
+            s["feasibility_output"]  = result
             s["approved_feasibility"] = s["estimation_output"] = s["approved_estimation"] = s["report_output"] = None
             _save(s)
-            _bg(_ingest_to_rag(
-                (s["selected_project"] or {}).get("id", ""),
-                _feasibility_output_to_text(result), "feasibility_agent_output.txt"
-            ))
+            _db_save(s)
+            _bg(_ingest_to_rag(pid, _feasibility_output_to_text(result), "feasibility_agent_output.txt"))
             step.output = f"Complexity: {result.complexity_level}"
         except Exception as e:
             step.output = f"Failed: {e}"
@@ -2120,6 +2100,101 @@ async def on_run_estimation(action: cl.Action):
     await _show_hitl3(s)
 
 
+# ── Estimation from Docs (SOW / reference docs shortcut) ─────────────────────
+
+@cl.action_callback("run_estimation_from_docs")
+@prevent_concurrent
+async def on_run_estimation_from_docs(action: cl.Action):
+    s   = _state()
+    pid = (s["selected_project"] or {}).get("id")
+    if not pid:
+        await cl.Message(content="❌ No project selected.").send()
+        return
+
+    # Fetch ALL stored chunks for this project in order — full doc, not just top-k
+    await cl.Message(content="📄 Reading reference documents…").send()
+    try:
+        doc_context = await asyncio.to_thread(get_all_project_doc_text, pid)
+    except Exception as e:
+        await cl.Message(content=f"❌ Failed to read documents: {e}").send()
+        return
+
+    if not doc_context.strip():
+        await cl.Message(content="❌ No indexed content found. Upload reference docs first.").send()
+        return
+
+    inc_mvp = s.get("include_mvp", False)
+    trace   = _start_trace(s)
+    s["cancel_requested"] = False
+    _save(s)
+
+    await cl.Message(
+        content=(
+            "⚡ **Running Estimation directly from your docs** — skipping Task / Planning / Feasibility agents.\n\n"
+            "⏳ This may take 2–5 minutes on free models…"
+        ),
+        actions=[cl.Action(name="stop_estimation", payload={}, label="⏹ Stop")],
+    ).send()
+
+    try:
+        # Step 1 — extract requirements/plan/feasibility from the raw docs
+        async with cl.Step(name="Extracting project context from docs", type="tool") as step0:
+            step0.input = f"Reading {len(doc_context):,} characters of document content…"
+            requirements, plan, feasibility = await asyncio.to_thread(
+                partial(extract_context_from_docs, doc_context, trace)
+            )
+            # Save to session so Report Agent can use them if user proceeds to report
+            s["approved_requirements"] = requirements
+            s["approved_plan"]         = plan
+            s["approved_feasibility"]  = feasibility
+            _save(s)
+            step0.output = (
+                f"{len(requirements.get('requirements', []))} requirements · "
+                f"architecture: {plan.get('architecture_type', '?')} · "
+                f"complexity: {feasibility.get('complexity_level', '?')}"
+            )
+
+        if _state().get("cancel_requested"):
+            await cl.Message(content="⏹ Cancelled after context extraction.").send()
+            return
+
+        # Step 2 — Pass 1: identify functionalities + modules
+        async with cl.Step(name="Mapping structure (Pass 1)", type="tool") as step1:
+            step1.input = "Identifying functionalities, modules & tech disciplines…"
+            pass1_result = await asyncio.to_thread(partial(
+                run_estimation_pass1,
+                requirements, plan, feasibility,
+                "", doc_context[:4000], trace,
+            ))
+            n_funcs = len(pass1_result.get("functionalities") or [])
+            n_mods  = sum(len(v) for v in (pass1_result.get("modules_by_func") or {}).values())
+            step1.output = f"Found {n_funcs} functionalities, {n_mods} modules"
+
+        if _state().get("cancel_requested"):
+            await cl.Message(content="⏹ Cancelled after Pass 1.").send()
+            return
+
+        # Step 3 — Pass 2: decompose into tasks (parallel)
+        async with cl.Step(name="Decomposing tasks (Pass 2 — parallel)", type="tool") as step2:
+            step2.input = f"Breaking down {n_mods} modules into tasks…"
+            result = await asyncio.to_thread(partial(run_estimation_pass2, pass1_result, inc_mvp, trace))
+            all_tasks = _get_all_tasks(result)
+            step2.output = f"Generated {len(all_tasks)} work items"
+
+        s["estimation_output"] = result
+        s["approved_estimation"] = s["report_output"] = None
+        _save(s)
+        _db_save(s)
+        _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
+
+    except Exception as e:
+        await cl.Message(content=f"❌ Estimation from docs failed: {e}").send()
+        return
+
+    await _show_estimation_result(s)
+    await _show_hitl3(s)
+
+
 # ── HITL #3 ───────────────────────────────────────────────────────────────────
 
 @cl.action_callback("hitl3_approve")
@@ -2128,12 +2203,36 @@ async def on_hitl3_approve(action: cl.Action):
     await _clear_hitl_buttons("hitl1_msg_id")
     await _clear_hitl_buttons("hitl2_msg_id")
     await _clear_hitl_buttons("hitl3_msg_id")
-    s = _state()
-    s["approved_estimation"] = _to_dict(s["estimation_output"])
-    _save(s)
-    _db_save(s)
-    await cl.Message(content="✅ Estimation approved! Ready to generate the Final Report.").send()
-    await _show_report_step(s)
+    s          = _state()
+    await cl.Message(content="✅ Estimation approved! Generating Final Report…").send()
+
+    async with cl.Step(name="Report Agent", type="tool") as step:
+        step.input = "Running report agent..."
+        try:
+            report_result = await asyncio.to_thread(
+                run_report_agent,
+                s["approved_requirements"],
+                _to_dict(s["approved_plan"]),
+                _to_dict(s["approved_feasibility"]),
+                _to_dict(s["estimation_output"]),
+                _trace(s),
+            )
+            report = report_result.model_dump()
+            if not report:
+                raise ValueError("Report agent returned empty output")
+            s["approved_estimation"] = _to_dict(s["estimation_output"])
+            s["report_output"] = report
+            _save(s)
+            _db_save(s)
+            step.output = f"Report generated — {len(report)} sections"
+            _end_trace(output={"report_sections": list(report.keys())})
+        except Exception as e:
+            step.output = f"Failed: {e}"
+            await cl.Message(content=f"❌ Report generation failed: {e}").send()
+            _end_trace()
+            return
+
+    await _show_report_result(s)
 
 
 @cl.action_callback("hitl3_regen")
@@ -2143,8 +2242,6 @@ async def on_hitl3_regen(action: cl.Action):
     await _clear_hitl_buttons("hitl2_msg_id")
     await _clear_hitl_buttons("hitl3_msg_id")
     s = _state()
-    s["cancel_requested"] = False
-    _save(s)
     res = await cl.AskUserMessage(
         content=(
             "💬 **What should the Estimation Agent change?**\n\n"
@@ -2155,9 +2252,9 @@ async def on_hitl3_regen(action: cl.Action):
         ),
         timeout=300,
     ).send()
-    feedback = res["output"].strip() if res else ""
-    pid      = (s["selected_project"] or {}).get("id")
-    inc_mvp  = s.get("include_mvp", False)
+    feedback   = res["output"].strip() if res else ""
+    pid        = (s["selected_project"] or {}).get("id")
+    inc_mvp    = s.get("include_mvp", False)
 
     rag_context = ""
     if pid:
@@ -2167,49 +2264,27 @@ async def on_hitl3_regen(action: cl.Action):
         except Exception:
             pass
 
-    await cl.Message(
-        content="⏳ Regenerating Estimation — this may take 2–5 minutes...",
-        actions=[cl.Action(name="stop_estimation", payload={}, label="⏹ Stop", description="Cancel after the current step")],
-    ).send()
-    try:
-        async with cl.Step(name="Mapping structure (Pass 1)", type="tool") as step1:
-            step1.input = f"Feedback: {feedback or 'none'} — re-identifying structure..."
-            pass1_result = await asyncio.to_thread(partial(
-                run_estimation_pass1,
-                s["approved_requirements"],
-                _to_dict(s["plan_output"]),
-                _to_dict(s["feasibility_output"]),
-                feedback,
-                rag_context,
-                _trace(s),
-            ))
-            n_funcs = len(pass1_result.get("functionalities") or [])
-            n_mods  = sum(len(v) for v in (pass1_result.get("modules_by_func") or {}).values())
-            step1.output = f"Found {n_funcs} functionalities, {n_mods} modules"
-
-        if _state().get("cancel_requested"):
-            await cl.Message(content="⏹ Estimation cancelled after Pass 1.").send()
+    await cl.Message(content="⏳ Regenerating Estimation — this may take 2–5 minutes...").send()
+    async with cl.Step(name="Estimation Agent (Regenerate)", type="tool") as step:
+        step.input = f"Feedback: {feedback or 'none'}"
+        try:
+            trace  = _trace(s)
+            ap     = _to_dict(s["approved_plan"])
+            af     = _to_dict(s["approved_feasibility"])
+            ar     = s["approved_requirements"]
+            p1     = await asyncio.to_thread(run_estimation_pass1, ar, ap, af, feedback, rag_context, trace)
+            result = await asyncio.to_thread(run_estimation_pass2, p1, inc_mvp, trace)
+            s["estimation_output"]   = result
+            s["approved_estimation"] = None
+            s["report_output"]       = None
+            _save(s)
+            _db_save(s)
+            _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
+            step.output = f"Regenerated {len(_get_all_tasks(result))} work items"
+        except Exception as e:
+            step.output = f"Failed: {e}"
+            await cl.Message(content=f"❌ Estimation regeneration failed: {e}").send()
             return
-
-        async with cl.Step(name="Decomposing tasks (Pass 2 — parallel)", type="tool") as step2:
-            step2.input = f"Breaking down {n_mods} modules into tasks..."
-            result = await asyncio.to_thread(partial(
-                run_estimation_pass2,
-                pass1_result,
-                inc_mvp,
-                _trace(s),
-            ))
-            all_res_tasks = _get_all_tasks(result)
-            step2.output = f"Regenerated {len(all_res_tasks)} work items"
-
-        s["estimation_output"] = result
-        s["approved_estimation"] = s["report_output"] = None
-        _save(s)
-        _db_save(s)
-        _bg(_ingest_to_rag(pid, _estimation_output_to_text(result), "estimation_agent_output.txt"))
-    except Exception as e:
-        await cl.Message(content=f"❌ Estimation regeneration failed: {e}").send()
-        return
 
     await _show_estimation_result(s)
     await _show_hitl3(s)
