@@ -9,6 +9,7 @@ __pycache__/
 # Virtual Environments
 .venv/
 .venv-1/
+.venv_win/
 venv/
 env/
 ENV/
@@ -40,3 +41,26 @@ Thumbs.db
 # Misc
 *.log
 *.tmp
+
+
+.claude/settings.local.json
+.mcp.json
+
+.claude
+# Runtime logs
+backend_log.txt
+streamlit_log.txt
+streamlit_run.log
+fastapi.log
+fastapi_run.log
+
+run.ps1
+public/
+knowlede_base/
+.venv/
+backend/hitl.py
+.files/ 
+.chainlit/
+frontend/app.py 
+frontend/app.py.bak
+

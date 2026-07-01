@@ -1,14 +1,15 @@
+
 """
 task_schema.py
 --------------
 Pydantic models defining the structured output of the Task Identification Agent.
 The agent extracts business information from a client meeting transcript.
 """
-
+ 
 from pydantic import BaseModel, Field
-from typing import List
-
-
+from typing import List, Dict
+ 
+ 
 class TaskAgentOutput(BaseModel):
     """
     Structured output from the Task Identification Agent.
@@ -33,4 +34,14 @@ class TaskAgentOutput(BaseModel):
     business_goals: List[str] = Field(
         default_factory=list,
         description="High-level business objectives the client wants to achieve with this project."
+    )
+
+    technology_context: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Technology-related context extracted from the transcript. "
+            "Keys are categories (e.g., 'existing_infrastructure', 'preferred_cloud', "
+            "'required_technologies', 'integrations', 'compliance_tools') and values are "
+            "descriptions of what the client mentioned or currently uses."
+        )
     )
